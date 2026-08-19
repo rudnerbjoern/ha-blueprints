@@ -7,34 +7,83 @@ blueprint:
     The blueprint evaluates the recommendations of all configured rooms and
     exposes a single recommendation for the entire floor.
 
+    In addition to the room recommendation states, the blueprint evaluates
+    the indoor and outdoor temperature information already exposed by the
+    Smart Ventilation room sensors. This thermal information is used only as
+    a floor-level tie-breaker. The physical ventilation decision for each
+    individual room remains the responsibility of the Smart Ventilation
+    Sensor blueprint.
+
     Floor states:
-      ventilate   = At least one room recommends ventilation and no room
-                    requires the windows to remain closed.
 
-      conditional = At least one room has a conditional recommendation, or
-                    room recommendations conflict between ventilate and
-                    keep_closed.
+      ventilate
+        At least one room recommends ventilation and no stronger conflicting
+        recommendation exists.
 
-      keep_closed = At least one room recommends keeping windows closed and
-                    no room recommends ventilation or conditional ventilation.
+      conditional
+        At least one room has a conditional recommendation, or there is a
+        direct conflict between rooms recommending ventilate and keep_closed.
 
-      neutral     = All configured rooms are neutral.
+      keep_closed
+        At least one room recommends keeping the windows closed and no room
+        recommends ventilation. A combination of conditional and keep_closed
+        is also promoted to keep_closed when the outdoor air is sufficiently
+        warmer than the average indoor temperature of the floor.
+
+      neutral
+        All configured rooms are neutral.
+
+    Aggregation priority:
+
+      1. ventilate + keep_closed
+           -> conditional
+
+         A direct conflict between a clear ventilation recommendation and a
+         clear keep-closed recommendation must remain visible.
+
+      2. conditional + keep_closed, no ventilate, and outdoor air is warmer
+         than the floor by at least the configured thermal override threshold
+           -> keep_closed
+
+         This prevents a conditional humidity benefit from causing a
+         floor-level ventilation recommendation when opening the windows would
+         noticeably heat the floor.
+
+      3. any conditional
+           -> conditional
+
+      4. any ventilate
+           -> ventilate
+
+      5. any keep_closed
+           -> keep_closed
+
+      6. otherwise
+           -> neutral
 
     The blueprint intentionally does not evaluate physical window or door
     states. Window-state evaluation, notifications, announcements, and other
     control logic belong in a separate control layer.
 
-    All configured room sensors must expose the Smart Ventilation API and use
-    one of these states:
+    All configured room sensors must expose Smart Ventilation room API
+    version 1 and use one of these states:
+
       ventilate
       conditional
       keep_closed
       neutral
 
+    Required room attributes:
+
+      api_version
+      indoor_temperature
+      outdoor_temperature
+      drying_potential
+
     If any configured room sensor is unavailable, unknown, exposes an
-    unsupported state, or does not expose the expected Smart Ventilation API
-    version, the floor sensor becomes unavailable instead of silently ignoring
-    that room.
+    unsupported state, has an unsupported API version, or does not provide
+    valid numeric temperature and drying-potential attributes, the floor
+    sensor becomes unavailable instead of silently ignoring that room.
 
   domain: template
   author: Björn Rudner (@rudnerbjoern)
@@ -49,12 +98,7 @@ blueprint:
     rooms:
       name: Room sensors
       description: >
-        Select the Smart Ventilation room sensors that belong to this floor.
-
-        The selected sensors are treated equally. Their order does not affect
-        the resulting floor recommendation.
-
-        At least one room sensor must be configured.
+        Smart Ventilation room sensors that belong to this floor.
       icon: mdi:home-floor-0
 
       input:
@@ -64,47 +108,121 @@ blueprint:
             Room-level sensors created from the Smart Ventilation Sensor
             blueprint.
 
-            Each selected sensor must expose API version 1 and one of the
-            supported recommendation states:
-            ventilate, conditional, keep_closed, or neutral.
+            Each selected sensor must expose Smart Ventilation room API
+            version 1.
           selector:
             entity:
               filter:
                 - domain: sensor
               multiple: true
 
-# Recalculate when Home Assistant starts, whenever one of the room sensors
-# changes, and periodically as a fallback.
+    thermal:
+      name: Thermal aggregation
+      description: >
+        Settings used only to resolve ambiguous floor-level combinations.
+
+        These settings do not replace or duplicate the physical ventilation
+        logic of the individual room sensors.
+      icon: mdi:thermometer-lines
+      collapsed: true
+
+      input:
+        thermal_override_temperature_difference:
+          name: Thermal override temperature difference
+          description: >
+            Minimum average temperature difference in °C between outdoor air
+            and the floor's indoor temperature at which a combination of
+            conditional and keep_closed is promoted to keep_closed.
+
+            The value is calculated as:
+
+              average outdoor temperature - average indoor temperature
+
+            Positive values mean the outdoor air is warmer.
+          default: 1.0
+          selector:
+            number:
+              min: 0.0
+              max: 10.0
+              step: 0.1
+              unit_of_measurement: "°C"
+              mode: box
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+
 triggers:
+  # Calculate after Home Assistant starts.
   - trigger: homeassistant
     event: start
 
+  # Recalculate whenever a configured room sensor changes.
+  #
+  # With no explicit from/to filter, attribute changes are relevant as well.
+  # This is important because temperature and drying-potential attributes may
+  # change while the room recommendation state itself remains unchanged.
   - trigger: state
     entity_id: !input room_sensors
 
+  # Safety fallback in case an upstream attribute update does not generate the
+  # expected state event.
   - trigger: time_pattern
     minutes: "/5"
 
+# ---------------------------------------------------------------------------
+# Calculation
+# ---------------------------------------------------------------------------
+
 actions:
-  # ---------------------------------------------------------------------------
-  # Blueprint input binding
-  # ---------------------------------------------------------------------------
-  #
-  # !input is a YAML tag and cannot be used directly inside Jinja templates.
-  # Bind the selected room sensors to a normal variable first.
-  # ---------------------------------------------------------------------------
+  # Blueprint inputs must first be bound to variables before they can safely be
+  # used inside Jinja templates.
   - variables:
       room_entities: !input room_sensors
+      thermal_override_threshold: !input thermal_override_temperature_difference
 
-  # ---------------------------------------------------------------------------
-  # Room-state counters
-  # ---------------------------------------------------------------------------
-  #
-  # Count how many configured rooms currently expose each valid Smart
-  # Ventilation recommendation.
-  #
-  # These counters are used both for aggregation and diagnostic attributes.
-  # ---------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Input validation
+  # -------------------------------------------------------------------------
+
+  - variables:
+      invalid_rooms_value: >-
+        {% set valid_states = [
+          'ventilate',
+          'conditional',
+          'keep_closed',
+          'neutral'
+        ] %}
+
+        {% set ns = namespace(rooms=[]) %}
+
+        {% for entity in room_entities %}
+          {% set room_state = states(entity) %}
+          {% set room_api = state_attr(entity, 'api_version') %}
+          {% set indoor_temperature =
+            state_attr(entity, 'indoor_temperature') %}
+          {% set outdoor_temperature =
+            state_attr(entity, 'outdoor_temperature') %}
+          {% set drying_potential =
+            state_attr(entity, 'drying_potential') %}
+
+          {% if
+            room_state not in valid_states
+            or (room_api | string) != '1'
+            or not is_number(indoor_temperature)
+            or not is_number(outdoor_temperature)
+            or not is_number(drying_potential)
+          %}
+            {% set ns.rooms = ns.rooms + [entity] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.rooms }}
+
+  # -------------------------------------------------------------------------
+  # Recommendation counts
+  # -------------------------------------------------------------------------
+
   - variables:
       ventilate_count: >-
         {% set ns = namespace(count=0) %}
@@ -150,41 +268,230 @@ actions:
 
         {{ ns.count }}
 
-  # ---------------------------------------------------------------------------
-  # Floor-level recommendation
-  # ---------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Temperature and drying-potential source values
   #
-  # Aggregation priority:
+  # Only numeric values are added to these lists. Invalid room sensors are
+  # already captured separately and will make the final sensor unavailable.
+  # Guarding the lists here prevents calculation errors while availability is
+  # being evaluated.
+  # -------------------------------------------------------------------------
+
+  - variables:
+      indoor_temperature_values: >-
+        {% set ns = namespace(values=[]) %}
+
+        {% for entity in room_entities %}
+          {% set value = state_attr(entity, 'indoor_temperature') %}
+
+          {% if is_number(value) %}
+            {% set ns.values = ns.values + [value | float] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.values }}
+
+      outdoor_temperature_values: >-
+        {% set ns = namespace(values=[]) %}
+
+        {% for entity in room_entities %}
+          {% set value = state_attr(entity, 'outdoor_temperature') %}
+
+          {% if is_number(value) %}
+            {% set ns.values = ns.values + [value | float] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.values }}
+
+      temperature_difference_values: >-
+        {% set ns = namespace(values=[]) %}
+
+        {% for entity in room_entities %}
+          {% set indoor =
+            state_attr(entity, 'indoor_temperature') %}
+          {% set outdoor =
+            state_attr(entity, 'outdoor_temperature') %}
+
+          {% if is_number(indoor) and is_number(outdoor) %}
+            {% set ns.values =
+              ns.values + [(outdoor | float) - (indoor | float)] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.values }}
+
+      drying_potential_values: >-
+        {% set ns = namespace(values=[]) %}
+
+        {% for entity in room_entities %}
+          {% set value = state_attr(entity, 'drying_potential') %}
+
+          {% if is_number(value) %}
+            {% set ns.values = ns.values + [value | float] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.values }}
+
+  # -------------------------------------------------------------------------
+  # Floor-level diagnostics
+  # -------------------------------------------------------------------------
+
+  - variables:
+      average_indoor_temperature: >-
+        {% if indoor_temperature_values | count > 0 %}
+          {{
+            (
+              indoor_temperature_values | sum
+              / indoor_temperature_values | count
+            ) | round(2)
+          }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      minimum_indoor_temperature: >-
+        {% if indoor_temperature_values | count > 0 %}
+          {{ indoor_temperature_values | min | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      maximum_indoor_temperature: >-
+        {% if indoor_temperature_values | count > 0 %}
+          {{ indoor_temperature_values | max | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      average_outdoor_temperature: >-
+        {% if outdoor_temperature_values | count > 0 %}
+          {{
+            (
+              outdoor_temperature_values | sum
+              / outdoor_temperature_values | count
+            ) | round(2)
+          }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      minimum_outdoor_temperature: >-
+        {% if outdoor_temperature_values | count > 0 %}
+          {{ outdoor_temperature_values | min | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      maximum_outdoor_temperature: >-
+        {% if outdoor_temperature_values | count > 0 %}
+          {{ outdoor_temperature_values | max | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      outdoor_temperature_spread: >-
+        {% if outdoor_temperature_values | count > 0 %}
+          {{
+            (
+              (outdoor_temperature_values | max)
+              - (outdoor_temperature_values | min)
+            ) | round(2)
+          }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      average_temperature_difference: >-
+        {% if temperature_difference_values | count > 0 %}
+          {{
+            (
+              temperature_difference_values | sum
+              / temperature_difference_values | count
+            ) | round(2)
+          }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      minimum_temperature_difference: >-
+        {% if temperature_difference_values | count > 0 %}
+          {{ temperature_difference_values | min | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      maximum_temperature_difference: >-
+        {% if temperature_difference_values | count > 0 %}
+          {{ temperature_difference_values | max | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      average_drying_potential: >-
+        {% if drying_potential_values | count > 0 %}
+          {{
+            (
+              drying_potential_values | sum
+              / drying_potential_values | count
+            ) | round(2)
+          }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+      maximum_drying_potential: >-
+        {% if drying_potential_values | count > 0 %}
+          {{ drying_potential_values | max | round(2) }}
+        {% else %}
+          {{ none }}
+        {% endif %}
+
+  # -------------------------------------------------------------------------
+  # Thermal floor interpretation
   #
-  # 1. ventilate + keep_closed
-  #      -> conditional
+  # Positive temperature_difference means that the outdoor air is warmer
+  # than the room.
+  # -------------------------------------------------------------------------
+
+  - variables:
+      outside_warmer_than_floor: >-
+        {{
+          is_number(average_temperature_difference)
+          and average_temperature_difference | float
+            >= thermal_override_threshold | float
+        }}
+
+      outside_warmer_than_all_rooms: >-
+        {{
+          is_number(minimum_temperature_difference)
+          and minimum_temperature_difference | float
+            >= thermal_override_threshold | float
+        }}
+
+  # The thermal override is deliberately narrow:
   #
-  #    Rooms disagree about whether ventilation is beneficial. The floor
-  #    therefore cannot produce an unconditional recommendation.
+  # - no room may explicitly recommend ventilate;
+  # - at least one room must be conditional;
+  # - at least one room must recommend keep_closed;
+  # - outdoor air must be sufficiently warmer than the floor average.
   #
-  # 2. any conditional
-  #      -> conditional
-  #
-  #    At least one room already has a constrained recommendation.
-  #
-  # 3. any ventilate
-  #      -> ventilate
-  #
-  #    Ventilation is useful somewhere on the floor and no room opposes it.
-  #
-  # 4. any keep_closed
-  #      -> keep_closed
-  #
-  #    At least one room should remain closed and no room needs ventilation.
-  #
-  # 5. otherwise
-  #      -> neutral
-  #
-  #    All rooms are neutral.
-  #
-  # This intentionally preserves the behavior of the previous floor-level
-  # aggregation logic.
-  # ---------------------------------------------------------------------------
+  # Therefore it only resolves an ambiguous conditional/keep_closed
+  # combination. It never overrides an explicit ventilate recommendation.
+  - variables:
+      thermal_override_active: >-
+        {{
+          ventilate_count | int == 0
+          and conditional_count | int > 0
+          and keep_closed_count | int > 0
+          and outside_warmer_than_floor | bool
+        }}
+
+  # -------------------------------------------------------------------------
+  # Floor recommendation
+  # -------------------------------------------------------------------------
+
   - variables:
       floor_recommendation: >-
         {% if
@@ -192,6 +499,9 @@ actions:
           and keep_closed_count | int > 0
         %}
           conditional
+
+        {% elif thermal_override_active | bool %}
+          keep_closed
 
         {% elif conditional_count | int > 0 %}
           conditional
@@ -206,21 +516,15 @@ actions:
           neutral
         {% endif %}
 
-  # ---------------------------------------------------------------------------
-  # Machine-readable floor reason
-  # ---------------------------------------------------------------------------
-  #
-  # Reason codes explain why the floor received its current recommendation.
-  # They are deliberately machine-readable so dashboards and future control
-  # blueprints can evaluate them reliably.
-  # ---------------------------------------------------------------------------
-  - variables:
       floor_reason: >-
         {% if
           ventilate_count | int > 0
           and keep_closed_count | int > 0
         %}
           conflicting_room_recommendations
+
+        {% elif thermal_override_active | bool %}
+          warm_outdoor_air_overrides_conditional
 
         {% elif conditional_count | int > 0 %}
           conditional_room_present
@@ -235,56 +539,24 @@ actions:
           all_rooms_neutral
         {% endif %}
 
+# ---------------------------------------------------------------------------
+# Floor sensor
+# ---------------------------------------------------------------------------
+
 sensor:
-  # ---------------------------------------------------------------------------
-  # Availability
-  # ---------------------------------------------------------------------------
+  # Fail closed if the room configuration is incomplete or incompatible.
   #
-  # The floor sensor is available only when:
-  #
-  # - at least one room sensor is configured
-  # - every configured room exposes a valid Smart Ventilation state
-  # - every configured room exposes API version 1
-  #
-  # Invalid rooms are deliberately NOT ignored. A missing or broken room could
-  # otherwise cause an unsafe or misleading floor-level recommendation.
-  #
-  # The API version is normalized to a string because Home Assistant may expose
-  # an attribute written as "1" as either string "1" or numeric 1.
-  # ---------------------------------------------------------------------------
+  # The calculation actions above are still written defensively so malformed
+  # inputs cannot cause division-by-zero or float-conversion errors before this
+  # availability template is evaluated.
   availability: >-
-    {% set valid_states = [
-      'ventilate',
-      'conditional',
-      'keep_closed',
-      'neutral'
-    ] %}
+    {{
+      room_entities | count > 0
+      and invalid_rooms_value | count == 0
+    }}
 
-    {% set ns = namespace(valid=true) %}
-
-    {% if room_entities | count == 0 %}
-      {% set ns.valid = false %}
-    {% endif %}
-
-    {% for entity in room_entities %}
-      {% if
-        states(entity) not in valid_states
-        or state_attr(entity, 'api_version') | string != '1'
-      %}
-        {% set ns.valid = false %}
-      {% endif %}
-    {% endfor %}
-
-    {{ ns.valid }}
-
-  # ---------------------------------------------------------------------------
-  # Main state
-  # ---------------------------------------------------------------------------
   state: "{{ floor_recommendation }}"
 
-  # ---------------------------------------------------------------------------
-  # Dynamic icon
-  # ---------------------------------------------------------------------------
   icon: >-
     {% if floor_recommendation == 'ventilate' %}
       mdi:window-open-variant
@@ -299,21 +571,35 @@ sensor:
       mdi:air-filter
     {% endif %}
 
-  # ---------------------------------------------------------------------------
-  # Diagnostic attributes
-  # ---------------------------------------------------------------------------
   attributes:
-    # Public machine-readable API version.
-    api_version: "1"
+    # -----------------------------------------------------------------------
+    # API
+    # -----------------------------------------------------------------------
 
-    # Machine-readable explanation of the floor-level recommendation.
+    # Version 2 introduces thermal floor aggregation and changes the
+    # conditional + keep_closed aggregation semantics.
+    api_version: "2"
+
+    room_api_version_required: "1"
+
     reason: "{{ floor_reason }}"
 
-    # -------------------------------------------------------------------------
-    # Basic counts
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Configuration diagnostics
+    # -----------------------------------------------------------------------
+
     room_count: >-
       {{ room_entities | count }}
+
+    invalid_rooms: >-
+      {{ invalid_rooms_value }}
+
+    thermal_override_temperature_difference: >-
+      {{ thermal_override_threshold | float }}
+
+    # -----------------------------------------------------------------------
+    # Recommendation counts
+    # -----------------------------------------------------------------------
 
     ventilate_count: >-
       {{ ventilate_count | int }}
@@ -327,13 +613,10 @@ sensor:
     neutral_count: >-
       {{ neutral_count | int }}
 
-    # -------------------------------------------------------------------------
-    # Rooms grouped by current recommendation
-    # -------------------------------------------------------------------------
-    #
-    # Entity IDs are exposed intentionally. This allows dashboards and future
-    # control logic to show which rooms caused the floor recommendation.
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Recommendation room lists
+    # -----------------------------------------------------------------------
+
     ventilate_rooms: >-
       {% set ns = namespace(rooms=[]) %}
 
@@ -378,37 +661,66 @@ sensor:
 
       {{ ns.rooms }}
 
-    # -------------------------------------------------------------------------
-    # Invalid room diagnostics
-    # -------------------------------------------------------------------------
-    #
-    # Lists rooms that currently prevent the floor sensor from being available.
-    #
-    # A room is considered invalid when:
-    # - its state is unavailable or unknown
-    # - it exposes an unsupported state
-    # - it does not expose Smart Ventilation API version 1
-    #
-    # This makes troubleshooting considerably easier than exposing only a generic
-    # unavailable floor state.
-    # -------------------------------------------------------------------------
-    invalid_rooms: >-
-      {% set valid_states = [
-        'ventilate',
-        'conditional',
-        'keep_closed',
-        'neutral'
-      ] %}
+    # -----------------------------------------------------------------------
+    # Floor temperature diagnostics
+    # -----------------------------------------------------------------------
 
-      {% set ns = namespace(rooms=[]) %}
+    average_indoor_temperature: >-
+      {{ average_indoor_temperature }}
 
-      {% for entity in room_entities %}
-        {% if
-          states(entity) not in valid_states
-          or state_attr(entity, 'api_version') | string != '1'
-        %}
-          {% set ns.rooms = ns.rooms + [entity] %}
-        {% endif %}
-      {% endfor %}
+    minimum_indoor_temperature: >-
+      {{ minimum_indoor_temperature }}
 
-      {{ ns.rooms }}
+    maximum_indoor_temperature: >-
+      {{ maximum_indoor_temperature }}
+
+    average_outdoor_temperature: >-
+      {{ average_outdoor_temperature }}
+
+    minimum_outdoor_temperature: >-
+      {{ minimum_outdoor_temperature }}
+
+    maximum_outdoor_temperature: >-
+      {{ maximum_outdoor_temperature }}
+
+    # Normally all room sensors use the same outdoor source. A non-zero
+    # spread therefore helps detect temporarily stale or differently
+    # configured room sensors without making the floor unavailable.
+    outdoor_temperature_spread: >-
+      {{ outdoor_temperature_spread }}
+
+    average_temperature_difference: >-
+      {{ average_temperature_difference }}
+
+    minimum_temperature_difference: >-
+      {{ minimum_temperature_difference }}
+
+    maximum_temperature_difference: >-
+      {{ maximum_temperature_difference }}
+
+    # -----------------------------------------------------------------------
+    # Drying diagnostics
+    #
+    # Drying potential is exposed for observability only. The Floor blueprint
+    # deliberately does not apply the room-level 0.8 / 2.0 / 4.0 g/m³
+    # thresholds again.
+    # -----------------------------------------------------------------------
+
+    average_drying_potential: >-
+      {{ average_drying_potential }}
+
+    maximum_drying_potential: >-
+      {{ maximum_drying_potential }}
+
+    # -----------------------------------------------------------------------
+    # Thermal aggregation diagnostics
+    # -----------------------------------------------------------------------
+
+    outside_warmer_than_floor: >-
+      {{ outside_warmer_than_floor | bool }}
+
+    outside_warmer_than_all_rooms: >-
+      {{ outside_warmer_than_all_rooms | bool }}
+
+    thermal_override_active: >-
+      {{ thermal_override_active | bool }}

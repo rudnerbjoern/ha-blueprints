@@ -4,6 +4,8 @@ Thumbs.db
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+!.vscode/schemas/
+!.vscode/schemas/**
 
 __pycache__/
 *.pyc

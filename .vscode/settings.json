@@ -6,8 +6,16 @@
   ],
 
   "yaml.customTags": [
-    "!input scalar"
+    "!input scalar",
+    "!input sequence",
+    "!input mapping"
   ],
+
+  "yaml.schemas": {
+    "./.vscode/schemas/template-blueprint.json": [
+      "blueprints/template/*.yaml"
+    ]
+  },
 
   "yaml.validate": true,
   "yaml.format.enable": true,
@@ -33,6 +41,7 @@
   "cSpell.words": [
     "automations",
     "elif",
+    "endfor",
     "homeassistant",
     "pathlib",
     "pycache",
