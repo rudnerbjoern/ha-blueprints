@@ -1,0 +1,46 @@
+{
+  "github.copilot.chat.commitMessageGeneration.instructions": [
+    {
+      "file": ".github/commit-message-instructions.md"
+    }
+  ],
+
+  "yaml.customTags": [
+    "!input scalar"
+  ],
+
+  "yaml.validate": true,
+  "yaml.format.enable": true,
+
+  "yaml.disableSchemaDetection": [
+    "blueprints/**/*.yaml",
+    "blueprints/**/*.yml",
+    "**/.github/workflows/*.yml",
+    "**/.github/workflows/*.yaml",
+    "**/.gitea/workflows/*.yml",
+    "**/.gitea/workflows/*.yaml",
+    "**/.forgejo/workflows/*.yml",
+    "**/.forgejo/workflows/*.yaml"
+  ],
+
+  "yamlLintFix.configFile": ".yamllint",
+
+  "[yaml]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.formatOnSave": true
+  },
+  "cSpell.words": [
+    "automations",
+    "elif",
+    "homeassistant",
+    "pathlib",
+    "pycache",
+    "rglob",
+    "rstrip",
+    "Rudner",
+    "rudnerbjoern",
+    "splitlines",
+    "venv"
+  ]
+}
