@@ -3,6 +3,8 @@
     "redhat.vscode-yaml",
     "keesschollaart.vscode-home-assistant",
     "kuscamara.yamllint-fix",
+    "ms-python.python",
+    "ms-python.vscode-pylance",
     "GitHub.copilot-chat"
   ]
 }
