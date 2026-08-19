@@ -18,18 +18,13 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install validators
+      - name: Install validation and test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yamllint
-
-      - name: Install validators and test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install yamllint pytest pytest-cov pyyaml
+          python -m pip install yamllint pytest pytest-cov pyyaml
 
       - name: Validate YAML
-        run: yamllint -c .yamllint .
+        run: python -m yamllint -c .yamllint .
 
       - name: Run tests
         run: python -m pytest -v
