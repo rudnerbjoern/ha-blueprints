@@ -517,6 +517,12 @@ actions:
         %}
           ventilate
 
+        {% elif
+          temperature_difference_value | float
+          >= warmer_outdoor_threshold_value
+        %}
+          keep_closed
+
         {% else %}
           neutral
         {% endif %}
@@ -570,6 +576,12 @@ actions:
           drying_potential_value | float >= minimum_drying_potential_value
         %}
           outdoor_air_drier
+
+        {% elif
+          temperature_difference_value | float
+          >= warmer_outdoor_threshold_value
+        %}
+          outdoor_air_warmer_without_drying_benefit
 
         {% else %}
           conditions_similar
