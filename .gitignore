@@ -1,0 +1,13 @@
+.DS_Store
+Thumbs.db
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+*.log
