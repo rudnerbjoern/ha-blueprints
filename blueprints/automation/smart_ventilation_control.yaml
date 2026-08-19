@@ -1,0 +1,416 @@
+blueprint:
+  name: Smart Ventilation Control
+  description: >
+    Combines one Smart Ventilation Floor sensor with the physical window and
+    door states of that floor and runs user-configurable actions when the
+    resulting control state changes.
+
+    Control states:
+
+      open
+        The floor recommends ventilation and none of the configured ventilation
+        openings is currently open.
+
+      close
+        The floor recommends keeping windows closed and at least one configured
+        close-warning opening is currently open.
+
+      ok
+        The physical window state already satisfies the floor recommendation.
+
+      conditional
+        The floor recommendation is conditional.
+
+      neutral
+        The floor recommendation is neutral.
+
+      unavailable
+        The floor sensor, its API version, or one of the configured window
+        states is invalid.
+
+    The floor sensor must expose Smart Ventilation Floor API version 2 and use
+    one of the states ventilate, conditional, keep_closed, or neutral.
+
+    opening_windows defines all windows and doors that may satisfy a ventilation
+    recommendation. closing_windows is optional and, when omitted, falls back to
+    opening_windows. If closing_windows is configured explicitly, it must be a
+    subset of opening_windows. This allows selected openings to count for
+    ventilation without creating close warnings.
+
+    The blueprint deliberately does not create an additional helper or template
+    entity. Derived-state template triggers fire only when their boolean result
+    changes from false to true, so open/close actions are not repeated for
+    unrelated updates while the effective control state remains unchanged.
+  domain: automation
+  author: Björn Rudner (@rudnerbjoern)
+  # yamllint disable-line rule:line-length
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/automation/smart_ventilation_control.yaml
+  homeassistant:
+    min_version: "2024.11.0"
+  input:
+    recommendation:
+      name: Floor recommendation
+      icon: mdi:home-floor-0
+      input:
+        floor_sensor:
+          name: Smart Ventilation floor sensor
+          description: >
+            Floor-level sensor created from the Smart Ventilation Floor
+            blueprint. It must expose Smart Ventilation Floor API version 2.
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - sensor
+
+    windows:
+      name: Windows and doors
+      icon: mdi:window-open-variant
+      input:
+        opening_windows:
+          name: Ventilation openings
+          description: >
+            Windows and doors that count as satisfying a ventilation
+            recommendation. At least one entity is required.
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - binary_sensor
+              multiple: true
+              reorder: false
+
+        closing_windows:
+          name: Close-warning openings
+          description: >
+            Optional subset of ventilation openings that should create a close
+            demand while open. Leave empty to use all ventilation openings.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - binary_sensor
+              multiple: true
+              reorder: false
+
+    actions_section:
+      name: Actions
+      description: >
+        Actions executed when the derived control state changes. Variables such
+        as control_state, windows_to_open, windows_to_close, floor_state,
+        floor_reason, and invalid_windows are available to these actions.
+      icon: mdi:play-circle-outline
+      input:
+        open_actions:
+          name: Open actions
+          default: []
+          selector:
+            action:
+
+        close_actions:
+          name: Close actions
+          default: []
+          selector:
+            action:
+
+        clear_actions:
+          name: Clear actions
+          description: >
+            Runs when the derived state becomes ok, conditional, or neutral.
+          default: []
+          selector:
+            action:
+
+        unavailable_actions:
+          name: Unavailable actions
+          default: []
+          selector:
+            action:
+
+trigger_variables:
+  floor_entity: !input floor_sensor
+  opening_entities: !input opening_windows
+  configured_closing_entities: !input closing_windows
+  closing_entities: >-
+    {% if configured_closing_entities | count > 0 %}
+      {{ configured_closing_entities }}
+    {% else %}
+      {{ opening_entities }}
+    {% endif %}
+
+triggers:
+  - trigger: template
+    id: open
+    value_template: >-
+      {% set valid_floor_states = [
+        'ventilate',
+        'conditional',
+        'keep_closed',
+        'neutral'
+      ] %}
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{
+        opening_entities | count > 0
+        and states(floor_entity) in valid_floor_states
+        and (state_attr(floor_entity, 'api_version') | string) == '2'
+        and invalid_closing | count == 0
+        and invalid_windows.count == 0
+        and states(floor_entity) == 'ventilate'
+        and (
+          opening_entities
+          | select('is_state', 'on')
+          | list
+          | count
+        ) == 0
+      }}
+
+  - trigger: template
+    id: close
+    value_template: >-
+      {% set valid_floor_states = [
+        'ventilate',
+        'conditional',
+        'keep_closed',
+        'neutral'
+      ] %}
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{
+        opening_entities | count > 0
+        and states(floor_entity) in valid_floor_states
+        and (state_attr(floor_entity, 'api_version') | string) == '2'
+        and invalid_closing | count == 0
+        and invalid_windows.count == 0
+        and states(floor_entity) == 'keep_closed'
+        and (
+          closing_entities
+          | select('is_state', 'on')
+          | list
+          | count
+        ) > 0
+      }}
+
+  - trigger: template
+    id: ok
+    value_template: >-
+      {% set valid_floor_states = [
+        'ventilate',
+        'conditional',
+        'keep_closed',
+        'neutral'
+      ] %}
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {% set floor_state = states(floor_entity) %}
+      {% set opening_count =
+        opening_entities
+        | select('is_state', 'on')
+        | list
+        | count
+      %}
+      {% set closing_count =
+        closing_entities
+        | select('is_state', 'on')
+        | list
+        | count
+      %}
+      {{
+        opening_entities | count > 0
+        and floor_state in valid_floor_states
+        and (state_attr(floor_entity, 'api_version') | string) == '2'
+        and invalid_closing | count == 0
+        and invalid_windows.count == 0
+        and (
+          (floor_state == 'ventilate' and opening_count > 0)
+          or
+          (floor_state == 'keep_closed' and closing_count == 0)
+        )
+      }}
+
+  - trigger: template
+    id: conditional
+    value_template: >-
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{
+        opening_entities | count > 0
+        and states(floor_entity) == 'conditional'
+        and (state_attr(floor_entity, 'api_version') | string) == '2'
+        and invalid_closing | count == 0
+        and invalid_windows.count == 0
+      }}
+
+  - trigger: template
+    id: neutral
+    value_template: >-
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{
+        opening_entities | count > 0
+        and states(floor_entity) == 'neutral'
+        and (state_attr(floor_entity, 'api_version') | string) == '2'
+        and invalid_closing | count == 0
+        and invalid_windows.count == 0
+      }}
+
+  - trigger: template
+    id: unavailable
+    value_template: >-
+      {% set valid_floor_states = [
+        'ventilate',
+        'conditional',
+        'keep_closed',
+        'neutral'
+      ] %}
+      {% set invalid_closing =
+        configured_closing_entities
+        | reject('in', opening_entities)
+        | list
+      %}
+      {% set invalid_windows = namespace(count=0) %}
+      {% for entity in opening_entities %}
+        {% if states(entity) not in ['on', 'off'] %}
+          {% set invalid_windows.count = invalid_windows.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{
+        opening_entities | count == 0
+        or states(floor_entity) not in valid_floor_states
+        or (state_attr(floor_entity, 'api_version') | string) != '2'
+        or invalid_closing | count > 0
+        or invalid_windows.count > 0
+      }}
+
+actions:
+  - variables:
+      control_state: "{{ trigger.id }}"
+      floor_state: "{{ states(floor_entity) }}"
+      floor_reason: "{{ state_attr(floor_entity, 'reason') }}"
+      invalid_closing_windows: >-
+        {% set ns = namespace(entities=[]) %}
+        {% for entity in configured_closing_entities %}
+          {% if entity not in opening_entities %}
+            {% set ns.entities = ns.entities + [entity] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities }}
+      invalid_windows: >-
+        {% set ns = namespace(entities=[]) %}
+        {% for entity in opening_entities %}
+          {% if states(entity) not in ['on', 'off'] %}
+            {% set ns.entities = ns.entities + [entity] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities }}
+      open_opening_windows: >-
+        {% set ns = namespace(entities=[]) %}
+        {% for entity in opening_entities %}
+          {% if is_state(entity, 'on') %}
+            {% set ns.entities = ns.entities + [entity] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities }}
+      closed_opening_windows: >-
+        {% set ns = namespace(entities=[]) %}
+        {% for entity in opening_entities %}
+          {% if is_state(entity, 'off') %}
+            {% set ns.entities = ns.entities + [entity] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities }}
+      open_closing_windows: >-
+        {% set ns = namespace(entities=[]) %}
+        {% for entity in closing_entities %}
+          {% if is_state(entity, 'on') %}
+            {% set ns.entities = ns.entities + [entity] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities }}
+
+  - variables:
+      windows_to_open: >-
+        {% if control_state == 'open' %}
+          {{ closed_opening_windows }}
+        {% else %}
+          {{ [] }}
+        {% endif %}
+      windows_to_close: >-
+        {% if control_state == 'close' %}
+          {{ open_closing_windows }}
+        {% else %}
+          {{ [] }}
+        {% endif %}
+
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: open
+        sequence: !input open_actions
+
+      - conditions:
+          - condition: trigger
+            id: close
+        sequence: !input close_actions
+
+      - conditions:
+          - condition: trigger
+            id:
+              - ok
+              - conditional
+              - neutral
+        sequence: !input clear_actions
+
+      - conditions:
+          - condition: trigger
+            id: unavailable
+        sequence: !input unavailable_actions
+
+mode: restart
+max_exceeded: silent
