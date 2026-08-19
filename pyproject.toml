@@ -11,6 +11,13 @@ addopts = [
 [tool.coverage.run]
 branch = true
 source = ["tests"]
+data_file = ".tmp/.coverage"
+
+[tool.coverage.html]
+directory = ".tmp/htmlcov"
+
+[tool.coverage.xml]
+output = ".tmp/coverage.xml"
 
 [tool.coverage.report]
 show_missing = true
