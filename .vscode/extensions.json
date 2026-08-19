@@ -1,6 +1,7 @@
 {
   "recommendations": [
     "redhat.vscode-yaml",
+    "keesschollaart.vscode-home-assistant",
     "kuscamara.yamllint-fix",
     "GitHub.copilot-chat"
   ]

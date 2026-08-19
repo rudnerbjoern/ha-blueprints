@@ -1,0 +1,386 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rudnerbjoern.local/schemas/home-assistant-template-blueprint.json",
+  "title": "Home Assistant Template Blueprint",
+  "description": "Repository-local schema for Home Assistant template blueprints.",
+  "type": "object",
+
+  "required": [
+    "blueprint"
+  ],
+
+  "properties": {
+    "blueprint": {
+      "$ref": "#/$defs/blueprintMetadata"
+    },
+
+    "triggers": {
+      "type": "array",
+      "description": "Trigger definitions for trigger-based template blueprints.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+
+    "conditions": {
+      "type": "array",
+      "description": "Optional conditions.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+
+    "actions": {
+      "type": "array",
+      "description": "Actions executed before template entities are rendered.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+
+    "variables": {
+      "type": "object",
+      "description": "Optional blueprint-level variables.",
+      "additionalProperties": true
+    },
+
+    "sensor": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "binary_sensor": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "light": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "switch": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "cover": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "fan": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "button": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "number": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "select": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "event": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "update": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "vacuum": {
+      "$ref": "#/$defs/templateEntityBlock"
+    },
+
+    "weather": {
+      "$ref": "#/$defs/templateEntityBlock"
+    }
+  },
+
+  "additionalProperties": true,
+
+  "$defs": {
+    "blueprintMetadata": {
+      "type": "object",
+
+      "required": [
+        "name",
+        "domain"
+      ],
+
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+
+        "description": {
+          "type": "string"
+        },
+
+        "domain": {
+          "const": "template"
+        },
+
+        "author": {
+          "type": "string"
+        },
+
+        "source_url": {
+          "type": "string"
+        },
+
+        "homeassistant": {
+          "type": "object",
+
+          "properties": {
+            "min_version": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                }
+              ]
+            }
+          },
+
+          "additionalProperties": true
+        },
+
+        "input": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/inputDefinitionOrSection"
+          }
+        }
+      },
+
+      "additionalProperties": true
+    },
+
+    "inputDefinitionOrSection": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/inputDefinition"
+        },
+        {
+          "$ref": "#/$defs/inputSection"
+        }
+      ]
+    },
+
+    "inputSection": {
+      "type": "object",
+
+      "required": [
+        "input"
+      ],
+
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+
+        "description": {
+          "type": "string"
+        },
+
+        "icon": {
+          "type": "string"
+        },
+
+        "collapsed": {
+          "type": "boolean"
+        },
+
+        "input": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/inputDefinition"
+          }
+        }
+      },
+
+      "additionalProperties": true
+    },
+
+    "inputDefinition": {
+      "type": "object",
+
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+
+        "description": {
+          "type": "string"
+        },
+
+        "default": {},
+
+        "selector": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+
+      "additionalProperties": true
+    },
+
+    "templateEntityBlock": {
+      "description": "Template entity configuration. Home Assistant template blueprints may expose one entity definition directly or an array depending on platform/context.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/templateEntity"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/templateEntity"
+          }
+        }
+      ]
+    },
+
+    "templateEntity": {
+      "type": "object",
+
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+
+        "unique_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+
+        "default_entity_id": {
+          "type": "string"
+        },
+
+        "state": {
+          "$ref": "#/$defs/templateValue"
+        },
+
+        "availability": {
+          "$ref": "#/$defs/templateValue"
+        },
+
+        "icon": {
+          "$ref": "#/$defs/templateValue"
+        },
+
+        "picture": {
+          "$ref": "#/$defs/templateValue"
+        },
+
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/templateValue"
+          }
+        },
+
+        "device_class": {
+          "type": "string"
+        },
+
+        "state_class": {
+          "type": "string"
+        },
+
+        "unit_of_measurement": {
+          "type": "string"
+        },
+
+        "entity_category": {
+          "type": "string"
+        },
+
+        "turn_on": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "turn_off": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "set_level": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "set_temperature": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "set_value": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "set_option": {
+          "$ref": "#/$defs/actionSequence"
+        },
+
+        "press": {
+          "$ref": "#/$defs/actionSequence"
+        }
+      },
+
+      "additionalProperties": true
+    },
+
+    "templateValue": {
+      "description": "Literal or Jinja-rendered Home Assistant template value.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+
+    "actionSequence": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true
+        }
+      ]
+    }
+  }
+}
