@@ -1,0 +1,414 @@
+blueprint:
+  name: Smart Ventilation Floor
+  description: >
+    Aggregates multiple Smart Ventilation room sensors into one floor-level
+    ventilation recommendation.
+
+    The blueprint evaluates the recommendations of all configured rooms and
+    exposes a single recommendation for the entire floor.
+
+    Floor states:
+      ventilate   = At least one room recommends ventilation and no room
+                    requires the windows to remain closed.
+
+      conditional = At least one room has a conditional recommendation, or
+                    room recommendations conflict between ventilate and
+                    keep_closed.
+
+      keep_closed = At least one room recommends keeping windows closed and
+                    no room recommends ventilation or conditional ventilation.
+
+      neutral     = All configured rooms are neutral.
+
+    The blueprint intentionally does not evaluate physical window or door
+    states. Window-state evaluation, notifications, announcements, and other
+    control logic belong in a separate control layer.
+
+    All configured room sensors must expose the Smart Ventilation API and use
+    one of these states:
+      ventilate
+      conditional
+      keep_closed
+      neutral
+
+    If any configured room sensor is unavailable, unknown, exposes an
+    unsupported state, or does not expose the expected Smart Ventilation API
+    version, the floor sensor becomes unavailable instead of silently ignoring
+    that room.
+
+  domain: template
+  author: Björn Rudner (@rudnerbjoern)
+
+  source_url: >-
+    https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/template/smart_ventilation_floor.yaml
+
+  homeassistant:
+    min_version: "2024.11.0"
+
+  input:
+    rooms:
+      name: Room sensors
+      description: >
+        Select the Smart Ventilation room sensors that belong to this floor.
+
+        The selected sensors are treated equally. Their order does not affect
+        the resulting floor recommendation.
+
+        At least one room sensor must be configured.
+      icon: mdi:home-floor-0
+
+      input:
+        room_sensors:
+          name: Smart Ventilation room sensors
+          description: >
+            Room-level sensors created from the Smart Ventilation Sensor
+            blueprint.
+
+            Each selected sensor must expose API version 1 and one of the
+            supported recommendation states:
+            ventilate, conditional, keep_closed, or neutral.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+              multiple: true
+
+# Recalculate when Home Assistant starts, whenever one of the room sensors
+# changes, and periodically as a fallback.
+triggers:
+  - trigger: homeassistant
+    event: start
+
+  - trigger: state
+    entity_id: !input room_sensors
+
+  - trigger: time_pattern
+    minutes: "/5"
+
+actions:
+  # ---------------------------------------------------------------------------
+  # Blueprint input binding
+  # ---------------------------------------------------------------------------
+  #
+  # !input is a YAML tag and cannot be used directly inside Jinja templates.
+  # Bind the selected room sensors to a normal variable first.
+  # ---------------------------------------------------------------------------
+  - variables:
+      room_entities: !input room_sensors
+
+  # ---------------------------------------------------------------------------
+  # Room-state counters
+  # ---------------------------------------------------------------------------
+  #
+  # Count how many configured rooms currently expose each valid Smart
+  # Ventilation recommendation.
+  #
+  # These counters are used both for aggregation and diagnostic attributes.
+  # ---------------------------------------------------------------------------
+  - variables:
+      ventilate_count: >-
+        {% set ns = namespace(count=0) %}
+
+        {% for entity in room_entities %}
+          {% if states(entity) == 'ventilate' %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.count }}
+
+      conditional_count: >-
+        {% set ns = namespace(count=0) %}
+
+        {% for entity in room_entities %}
+          {% if states(entity) == 'conditional' %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.count }}
+
+      keep_closed_count: >-
+        {% set ns = namespace(count=0) %}
+
+        {% for entity in room_entities %}
+          {% if states(entity) == 'keep_closed' %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.count }}
+
+      neutral_count: >-
+        {% set ns = namespace(count=0) %}
+
+        {% for entity in room_entities %}
+          {% if states(entity) == 'neutral' %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.count }}
+
+  # ---------------------------------------------------------------------------
+  # Floor-level recommendation
+  # ---------------------------------------------------------------------------
+  #
+  # Aggregation priority:
+  #
+  # 1. ventilate + keep_closed
+  #      -> conditional
+  #
+  #    Rooms disagree about whether ventilation is beneficial. The floor
+  #    therefore cannot produce an unconditional recommendation.
+  #
+  # 2. any conditional
+  #      -> conditional
+  #
+  #    At least one room already has a constrained recommendation.
+  #
+  # 3. any ventilate
+  #      -> ventilate
+  #
+  #    Ventilation is useful somewhere on the floor and no room opposes it.
+  #
+  # 4. any keep_closed
+  #      -> keep_closed
+  #
+  #    At least one room should remain closed and no room needs ventilation.
+  #
+  # 5. otherwise
+  #      -> neutral
+  #
+  #    All rooms are neutral.
+  #
+  # This intentionally preserves the behavior of the previous floor-level
+  # aggregation logic.
+  # ---------------------------------------------------------------------------
+  - variables:
+      floor_recommendation: >-
+        {% if
+          ventilate_count | int > 0
+          and keep_closed_count | int > 0
+        %}
+          conditional
+
+        {% elif conditional_count | int > 0 %}
+          conditional
+
+        {% elif ventilate_count | int > 0 %}
+          ventilate
+
+        {% elif keep_closed_count | int > 0 %}
+          keep_closed
+
+        {% else %}
+          neutral
+        {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # Machine-readable floor reason
+  # ---------------------------------------------------------------------------
+  #
+  # Reason codes explain why the floor received its current recommendation.
+  # They are deliberately machine-readable so dashboards and future control
+  # blueprints can evaluate them reliably.
+  # ---------------------------------------------------------------------------
+  - variables:
+      floor_reason: >-
+        {% if
+          ventilate_count | int > 0
+          and keep_closed_count | int > 0
+        %}
+          conflicting_room_recommendations
+
+        {% elif conditional_count | int > 0 %}
+          conditional_room_present
+
+        {% elif ventilate_count | int > 0 %}
+          ventilation_recommended
+
+        {% elif keep_closed_count | int > 0 %}
+          keep_closed_room_present
+
+        {% else %}
+          all_rooms_neutral
+        {% endif %}
+
+sensor:
+  # ---------------------------------------------------------------------------
+  # Availability
+  # ---------------------------------------------------------------------------
+  #
+  # The floor sensor is available only when:
+  #
+  # - at least one room sensor is configured
+  # - every configured room exposes a valid Smart Ventilation state
+  # - every configured room exposes API version 1
+  #
+  # Invalid rooms are deliberately NOT ignored. A missing or broken room could
+  # otherwise cause an unsafe or misleading floor-level recommendation.
+  #
+  # The API version is normalized to a string because Home Assistant may expose
+  # an attribute written as "1" as either string "1" or numeric 1.
+  # ---------------------------------------------------------------------------
+  availability: >-
+    {% set valid_states = [
+      'ventilate',
+      'conditional',
+      'keep_closed',
+      'neutral'
+    ] %}
+
+    {% set ns = namespace(valid=true) %}
+
+    {% if room_entities | count == 0 %}
+      {% set ns.valid = false %}
+    {% endif %}
+
+    {% for entity in room_entities %}
+      {% if
+        states(entity) not in valid_states
+        or state_attr(entity, 'api_version') | string != '1'
+      %}
+        {% set ns.valid = false %}
+      {% endif %}
+    {% endfor %}
+
+    {{ ns.valid }}
+
+  # ---------------------------------------------------------------------------
+  # Main state
+  # ---------------------------------------------------------------------------
+  state: "{{ floor_recommendation }}"
+
+  # ---------------------------------------------------------------------------
+  # Dynamic icon
+  # ---------------------------------------------------------------------------
+  icon: >-
+    {% if floor_recommendation == 'ventilate' %}
+      mdi:window-open-variant
+
+    {% elif floor_recommendation == 'conditional' %}
+      mdi:weather-windy
+
+    {% elif floor_recommendation == 'keep_closed' %}
+      mdi:window-closed-variant
+
+    {% else %}
+      mdi:air-filter
+    {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # Diagnostic attributes
+  # ---------------------------------------------------------------------------
+  attributes:
+    # Public machine-readable API version.
+    api_version: "1"
+
+    # Machine-readable explanation of the floor-level recommendation.
+    reason: "{{ floor_reason }}"
+
+    # -------------------------------------------------------------------------
+    # Basic counts
+    # -------------------------------------------------------------------------
+    room_count: >-
+      {{ room_entities | count }}
+
+    ventilate_count: >-
+      {{ ventilate_count | int }}
+
+    conditional_count: >-
+      {{ conditional_count | int }}
+
+    keep_closed_count: >-
+      {{ keep_closed_count | int }}
+
+    neutral_count: >-
+      {{ neutral_count | int }}
+
+    # -------------------------------------------------------------------------
+    # Rooms grouped by current recommendation
+    # -------------------------------------------------------------------------
+    #
+    # Entity IDs are exposed intentionally. This allows dashboards and future
+    # control logic to show which rooms caused the floor recommendation.
+    # -------------------------------------------------------------------------
+    ventilate_rooms: >-
+      {% set ns = namespace(rooms=[]) %}
+
+      {% for entity in room_entities %}
+        {% if states(entity) == 'ventilate' %}
+          {% set ns.rooms = ns.rooms + [entity] %}
+        {% endif %}
+      {% endfor %}
+
+      {{ ns.rooms }}
+
+    conditional_rooms: >-
+      {% set ns = namespace(rooms=[]) %}
+
+      {% for entity in room_entities %}
+        {% if states(entity) == 'conditional' %}
+          {% set ns.rooms = ns.rooms + [entity] %}
+        {% endif %}
+      {% endfor %}
+
+      {{ ns.rooms }}
+
+    keep_closed_rooms: >-
+      {% set ns = namespace(rooms=[]) %}
+
+      {% for entity in room_entities %}
+        {% if states(entity) == 'keep_closed' %}
+          {% set ns.rooms = ns.rooms + [entity] %}
+        {% endif %}
+      {% endfor %}
+
+      {{ ns.rooms }}
+
+    neutral_rooms: >-
+      {% set ns = namespace(rooms=[]) %}
+
+      {% for entity in room_entities %}
+        {% if states(entity) == 'neutral' %}
+          {% set ns.rooms = ns.rooms + [entity] %}
+        {% endif %}
+      {% endfor %}
+
+      {{ ns.rooms }}
+
+    # -------------------------------------------------------------------------
+    # Invalid room diagnostics
+    # -------------------------------------------------------------------------
+    #
+    # Lists rooms that currently prevent the floor sensor from being available.
+    #
+    # A room is considered invalid when:
+    # - its state is unavailable or unknown
+    # - it exposes an unsupported state
+    # - it does not expose Smart Ventilation API version 1
+    #
+    # This makes troubleshooting considerably easier than exposing only a generic
+    # unavailable floor state.
+    # -------------------------------------------------------------------------
+    invalid_rooms: >-
+      {% set valid_states = [
+        'ventilate',
+        'conditional',
+        'keep_closed',
+        'neutral'
+      ] %}
+
+      {% set ns = namespace(rooms=[]) %}
+
+      {% for entity in room_entities %}
+        {% if
+          states(entity) not in valid_states
+          or state_attr(entity, 'api_version') | string != '1'
+        %}
+          {% set ns.rooms = ns.rooms + [entity] %}
+        {% endif %}
+      {% endfor %}
+
+      {{ ns.rooms }}
