@@ -1,0 +1,503 @@
+# Smart Ventilation Dashboard - Room Card
+#
+# Reusable custom:button-card template for a Smart Ventilation Room API v1
+# sensor. The card shows the ventilation recommendation, recommended duration,
+# window state, indoor/outdoor climate values and heating information.
+#
+# Prerequisite:
+#   - custom:button-card
+#
+# Required card entity:
+#   - Smart Ventilation Room API v1 sensor
+#
+# Required variables:
+#   accent       Accent color for the room/floor
+#   temp         Indoor temperature sensor
+#   hum          Indoor relative humidity sensor
+#   abs          Indoor absolute humidity / vapor concentration sensor
+#   outside_temp Outdoor temperature sensor
+#   outside_hum  Outdoor relative humidity sensor
+#   outside_abs  Outdoor absolute humidity / vapor concentration sensor
+#   windows      List of binary_sensor window/door entities
+#   heating      climate entity for the room
+#
+# Optional variables:
+#   valves       List of valve-opening sensors (default: [])
+#
+# Example usage is documented in README.md.
+
+vent_room:
+  variables:
+    accent: "#5ea9ff"
+    temp: null
+    hum: null
+    abs: null
+    outside_temp: null
+    outside_hum: null
+    outside_abs: null
+    windows: []
+    heating: null
+    valves: []
+
+  # The room sensor itself remains the default More-Info target.
+  show_icon: true
+  show_name: true
+  show_label: false
+  tap_action:
+    action: more-info
+
+  styles:
+    card:
+      - padding: 13px 16px
+      - border-radius: 14px
+      - border: 1px solid var(--divider-color)
+      - background: var(--ha-card-background, var(--card-background-color))
+      - box-shadow: var(--ha-card-box-shadow, none)
+    grid:
+      - grid-template-areas: '"i n win" "i rec rec" "details details details"'
+      - grid-template-columns: 48px minmax(150px, 1fr) auto
+      - grid-template-rows: 24px 22px auto
+      - column-gap: 12px
+      - row-gap: 5px
+      - align-items: center
+    img_cell:
+      - width: 40px
+      - height: 40px
+      - border-radius: 10px
+      - background: "[[[ return `${variables.accent}18`; ]]]"
+    icon:
+      - width: 26px
+      - color: "[[[ return variables.accent; ]]]"
+    name:
+      - justify-self: start
+      - font-size: 15px
+      - font-weight: 700
+    custom_fields:
+      rec:
+        - justify-self: start
+        - font-size: 12px
+      details:
+        - justify-self: stretch
+        - font-size: 12px
+        - color: var(--secondary-text-color)
+        - padding-top: 4px
+      win:
+        - justify-self: end
+        - font-size: 12px
+
+  custom_fields:
+    # -------------------------------------------------------------------------
+    # Recommendation
+    # -------------------------------------------------------------------------
+    # Uses the Room API v1 state directly and adds recommended_duration_minutes
+    # only when ventilation is actually recommended.
+    rec: >-
+      [[[
+        const s = entity?.state || '';
+        const txt =
+          s === 'ventilate' ? 'Lüften' :
+          s === 'conditional' ? 'Bedingt lüften' :
+          s === 'keep_closed' ? 'Geschlossen halten' :
+          s === 'neutral' ? 'Neutral' :
+          'Nicht verfügbar';
+
+        const ic =
+          s === 'ventilate' ? 'mdi:window-open-variant' :
+          s === 'conditional' ? 'mdi:weather-partly-cloudy' :
+          s === 'keep_closed' ? 'mdi:window-closed-variant' :
+          s === 'neutral' ? 'mdi:minus-circle-outline' :
+          'mdi:alert-circle-outline';
+
+        const c =
+          s === 'keep_closed' ? '#ff6b6b' :
+          s === 'neutral' ? '#9aa0a6' :
+          variables.accent;
+
+        const d = Number(entity?.attributes?.recommended_duration_minutes);
+        const dur =
+          Number.isFinite(d) && d > 0 && ['ventilate', 'conditional'].includes(s)
+            ? ` · ${Math.round(d)} min`
+            : '';
+
+        return `<span style="display:flex;gap:7px;align-items:center;color:${c}"><ha-icon icon="${ic}" style="width:18px"></ha-icon>${txt}${dur}</span>`;
+      ]]]
+
+    # -------------------------------------------------------------------------
+    # Responsive detail area
+    # -------------------------------------------------------------------------
+    # The layout responds to the width of the room card itself, not to the
+    # browser viewport. This keeps narrow dashboard columns usable even on a
+    # wide desktop screen.
+    details:
+      card:
+        type: custom:button-card
+        show_name: false
+        show_icon: false
+        show_state: false
+        tap_action:
+          action: none
+        styles:
+          card:
+            - padding: 9px 0 0
+            - margin: 0
+            - border-radius: 0
+            - border: 0
+            - border-top: 1px solid var(--divider-color)
+            - background: transparent
+            - box-shadow: none
+            - overflow: visible
+            - container-type: inline-size
+          grid:
+            - grid-template-areas: '"climate" "heat"'
+            - grid-template-columns: minmax(0, 1fr)
+            - gap: 8px
+        extra_styles: >-
+          @container (min-width:560px){#container{grid-template-areas:"climate heat" !important;grid-template-columns:minmax(0,1.65fr) minmax(210px,.85fr) !important;gap:10px !important;}}
+
+        custom_fields:
+          # -------------------------------------------------------------------
+          # Indoor / outdoor climate matrix
+          # -------------------------------------------------------------------
+          climate:
+            card:
+              type: custom:button-card
+              show_name: false
+              show_icon: false
+              show_state: false
+              tap_action:
+                action: none
+              styles:
+                card:
+                  - padding: 10px
+                  - border-radius: 11px
+                  - border: 1px solid var(--divider-color)
+                  - background: var(--secondary-background-color)
+                  - box-shadow: none
+                  - overflow: hidden
+                grid:
+                  - grid-template-areas: '"blank blank hin hout" "temp temp temp tout" "hum hum hum houtv" "abs abs abs aout"'
+                  - grid-template-columns: 20px minmax(72px, 1fr) minmax(62px, .78fr) minmax(62px, .78fr)
+                  - column-gap: 6px
+                  - row-gap: 7px
+                  - align-items: center
+                custom_fields:
+                  hin:
+                    - font-size: 10px
+                    - font-weight: 800
+                    - text-align: right
+                    - color: "[[[ return variables.accent; ]]]"
+                  hout:
+                    - font-size: 10px
+                    - font-weight: 800
+                    - text-align: right
+                    - color: "#72e6a6"
+              custom_fields:
+                blank: ""
+                hin: INNEN
+                hout: AUSSEN
+
+                # Indoor temperature: native button-card tap action works on
+                # desktop and touch devices.
+                temp:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.temp; ]]]"
+                    icon: mdi:thermometer
+                    name: Temperatur
+                    show_icon: true
+                    show_name: true
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      grid:
+                        - grid-template-areas: '"i n s"'
+                        - grid-template-columns: 20px minmax(0, 1fr) auto
+                        - column-gap: 6px
+                      icon:
+                        - width: 15px
+                        - color: "#ff8a65"
+                      name:
+                        - justify-self: start
+                        - font-size: 12px
+                        - color: var(--primary-text-color)
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#ffb199"
+                        - white-space: nowrap
+
+                tout:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.outside_temp; ]]]"
+                    show_icon: false
+                    show_name: false
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#72e6a6"
+                        - white-space: nowrap
+
+                hum:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.hum; ]]]"
+                    icon: mdi:water-percent
+                    name: Rel. Feuchte
+                    show_icon: true
+                    show_name: true
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      grid:
+                        - grid-template-areas: '"i n s"'
+                        - grid-template-columns: 20px minmax(0, 1fr) auto
+                        - column-gap: 6px
+                      icon:
+                        - width: 15px
+                        - color: "#5ea9ff"
+                      name:
+                        - justify-self: start
+                        - font-size: 12px
+                        - color: var(--primary-text-color)
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#8fc3ff"
+                        - white-space: nowrap
+
+                houtv:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.outside_hum; ]]]"
+                    show_icon: false
+                    show_name: false
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#5ea9ff"
+                        - white-space: nowrap
+
+                abs:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.abs; ]]]"
+                    icon: mdi:water-opacity
+                    name: Abs. Feuchte
+                    show_icon: true
+                    show_name: true
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      grid:
+                        - grid-template-areas: '"i n s"'
+                        - grid-template-columns: 20px minmax(0, 1fr) auto
+                        - column-gap: 6px
+                      icon:
+                        - width: 15px
+                        - color: "#b66cff"
+                      name:
+                        - justify-self: start
+                        - font-size: 12px
+                        - color: var(--primary-text-color)
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#c98cff"
+                        - white-space: nowrap
+
+                aout:
+                  card:
+                    type: custom:button-card
+                    entity: "[[[ return variables.outside_abs; ]]]"
+                    show_icon: false
+                    show_name: false
+                    show_state: true
+                    tap_action:
+                      action: more-info
+                    styles:
+                      card:
+                        - padding: 0
+                        - border: 0
+                        - background: transparent
+                        - box-shadow: none
+                        - border-radius: 6px
+                        - min-height: 19px
+                      state:
+                        - justify-self: end
+                        - font-size: 12px
+                        - font-weight: 700
+                        - color: "#b66cff"
+                        - white-space: nowrap
+
+          # -------------------------------------------------------------------
+          # Heating panel
+          # -------------------------------------------------------------------
+          # The whole panel is one native tap target, avoiding brittle DOM
+          # event handlers and making the interaction reliable on touch devices.
+          heat:
+            card:
+              type: custom:button-card
+              entity: "[[[ return variables.heating; ]]]"
+              show_name: false
+              show_icon: false
+              show_state: false
+              tap_action:
+                action: more-info
+              styles:
+                card:
+                  - padding: 10px
+                  - border-radius: 11px
+                  - border: 1px solid var(--divider-color)
+                  - background: var(--secondary-background-color)
+                  - box-shadow: none
+                  - min-height: 100%
+                  - cursor: pointer
+                grid:
+                  - grid-template-areas: '"hh hh hh" "i1 n1 v1" "i2 n2 v2" "i3 n3 v3"'
+                  - grid-template-columns: 20px minmax(64px, 1fr) minmax(78px, auto)
+                  - column-gap: 7px
+                  - row-gap: 7px
+                  - align-items: center
+                custom_fields:
+                  hh:
+                    - font-size: 10px
+                    - font-weight: 800
+                    - text-align: center
+                    - color: >-
+                        [[[ const c=states[variables.heating]; const a=c?.attributes?.hvac_action||'idle'; return a==='heating'?'#ff9f43':a==='off'?'#87939f':'#5ea9ff'; ]]]
+                  n1:
+                    - color: var(--primary-text-color)
+                    - font-size: 12px
+                    - line-height: "1.2"
+                  n2:
+                    - color: var(--primary-text-color)
+                    - font-size: 12px
+                    - line-height: "1.2"
+                  n3:
+                    - color: var(--primary-text-color)
+                    - font-size: 12px
+                    - line-height: "1.2"
+                  v1:
+                    - justify-self: end
+                    - font-weight: 700
+                    - white-space: nowrap
+                    - font-size: 12px
+                    - line-height: "1.2"
+                    - color: >-
+                        [[[ const c=states[variables.heating]; const a=c?.attributes?.hvac_action||'idle'; return a==='heating'?'#ff9f43':a==='off'?'#87939f':'#5ea9ff'; ]]]
+                  v2:
+                    - justify-self: end
+                    - font-weight: 700
+                    - white-space: nowrap
+                    - font-size: 12px
+                    - line-height: "1.2"
+                    - color: >-
+                        [[[ const c=states[variables.heating]; const a=c?.attributes?.hvac_action||'idle'; return a==='heating'?'#ff9f43':a==='off'?'#87939f':'#5ea9ff'; ]]]
+                  v3:
+                    - justify-self: end
+                    - font-weight: 700
+                    - white-space: nowrap
+                    - font-size: 12px
+                    - line-height: "1.2"
+                    - color: >-
+                        [[[ const c=states[variables.heating]; const a=c?.attributes?.hvac_action||'idle'; return a==='heating'?'#ff9f43':a==='off'?'#87939f':'#5ea9ff'; ]]]
+              custom_fields:
+                hh: HEIZUNG
+                i1: '<ha-icon icon="mdi:thermometer-chevron-up" style="width:15px;height:15px;color:#ff8a65"></ha-icon>'
+                n1: Soll
+                v1: >-
+                  [[[ const c=states[variables.heating]; return `${c?.attributes?.temperature ?? '–'} °C`; ]]]
+                i2: '<ha-icon icon="mdi:radiator" style="width:15px;height:15px;color:#ff9f43"></ha-icon>'
+                n2: Status
+                v2: >-
+                  [[[ const c=states[variables.heating]; const a=c?.attributes?.hvac_action||'idle'; return a==='heating'?'Heizt':a==='off'?'Aus':'Bereitschaft'; ]]]
+                i3: '<ha-icon icon="mdi:valve" style="width:15px;height:15px;color:#9aa6b2"></ha-icon>'
+                n3: Ventil
+                v3: >-
+                  [[[ const vs=variables.valves||[]; if(vs.length===0)return '–'; if(vs.length===1)return `${states[vs[0]]?.state??'–'} %`; return `${vs.map(e=>states[e]?.state??'–').join(' / ')} %`; ]]]
+
+    # -------------------------------------------------------------------------
+    # Window status chip
+    # -------------------------------------------------------------------------
+    # One window -> opens that window.
+    # Multiple windows with exactly one open -> opens that window.
+    # Otherwise -> falls back to the Room sensor More-Info dialog.
+    win:
+      card:
+        type: custom:button-card
+        entity: >-
+          [[[ const ws=variables.windows||[]; const open=ws.filter(e=>states[e]?.state==='on'); return ws.length===1?ws[0]:(open.length===1?open[0]:entity.entity_id); ]]]
+        show_icon: false
+        show_name: true
+        show_state: false
+        tap_action:
+          action: more-info
+        name: >-
+          [[[ const ws=variables.windows||[]; const open=ws.filter(e=>states[e]?.state==='on').length; return open?(open===1?'1 offen':`${open} offen`):(ws.length===1?'geschlossen':`${ws.length} geschlossen`); ]]]
+        styles:
+          card:
+            - padding: 6px 9px
+            - border-radius: 999px
+            - border: 0
+            - box-shadow: none
+            - background: >-
+                [[[ const ws=variables.windows||[]; const open=ws.filter(e=>states[e]?.state==='on').length; return open?'#ff6b6b18':'#76d39b18'; ]]]
+            - cursor: pointer
+          name:
+            - font-size: 12px
+            - font-weight: 500
+            - color: >-
+                [[[ const ws=variables.windows||[]; const open=ws.filter(e=>states[e]?.state==='on').length; return open?'#ff6b6b':'#76d39b'; ]]]
+            - white-space: nowrap

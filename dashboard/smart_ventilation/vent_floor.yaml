@@ -1,0 +1,255 @@
+# Smart Ventilation Dashboard - Floor Card
+#
+# Reusable custom:button-card template for a Smart Ventilation Floor API v2
+# sensor. The card summarizes the floor recommendation, compares it with the
+# configured window states and shows a small status badge attached to the icon.
+#
+# Prerequisite:
+#   - custom:button-card
+#
+# Required card entity:
+#   - Smart Ventilation Floor API v2 sensor
+#
+# Required variables:
+#   accent          Accent color for the floor/card
+#   opening_windows List of window/door binary_sensors that may be opened
+#
+# Optional variables:
+#   windows          Alias/fallback for opening_windows
+#   closing_windows  Subset of opening_windows that should be closed when the
+#                    recommendation is keep_closed. If empty, opening_windows
+#                    is used.
+#
+# The card itself does not control windows. It mirrors the state logic used by
+# the Smart Ventilation Control blueprint so the dashboard and automation use
+# the same interpretation of the Floor API.
+
+vent_floor:
+  variables:
+    accent: "#5ea9ff"
+    windows: []
+    opening_windows: []
+    closing_windows: []
+
+  show_icon: true
+  show_name: true
+  show_label: true
+  tap_action:
+    action: more-info
+  hold_action:
+    action: none
+
+  styles:
+    card:
+      - height: 230px
+      - padding: 22px
+      - border-radius: 18px
+      - border: "[[[ return `1px solid ${variables.accent}88`; ]]]"
+      - background: "[[[ return `linear-gradient(145deg, ${variables.accent}14 0%, var(--ha-card-background, var(--card-background-color)) 58%)`; ]]]"
+      - box-shadow: var(--ha-card-box-shadow, none)
+      - overflow: hidden
+    grid:
+      - grid-template-areas: '"i n" "i l" "status status" "substatus substatus" "windows windows"'
+      - grid-template-columns: 64px 1fr
+      - grid-template-rows: 32px 24px 46px 22px 34px
+      - column-gap: 14px
+    icon:
+      - width: 43px
+      - color: "[[[ return variables.accent; ]]]"
+      - filter: "[[[ return `drop-shadow(0 0 12px ${variables.accent}aa)`; ]]]"
+    img_cell:
+      - width: 62px
+      - height: 62px
+      - border-radius: 50%
+      - background: "[[[ return `radial-gradient(circle, ${variables.accent}28, ${variables.accent}0f)`; ]]]"
+      - box-shadow: "[[[ return `0 0 28px ${variables.accent}32`; ]]]"
+      - align-self: start
+    name:
+      - font-size: 22px
+      - font-weight: 700
+      - justify-self: start
+      - align-self: end
+      - color: var(--primary-text-color)
+    label:
+      - font-size: 13px
+      - justify-self: start
+      - align-self: start
+      - color: var(--secondary-text-color)
+    custom_fields:
+      status:
+        - justify-self: start
+        - align-self: end
+        - font-size: 23px
+        - font-weight: 750
+        - line-height: 1.2
+        - padding-top: 10px
+        - text-shadow: 0 2px 14px rgba(0,0,0,.45)
+        - color: var(--primary-text-color)
+      substatus:
+        - justify-self: start
+        - align-self: start
+        - font-size: 15px
+        - font-weight: 500
+        - line-height: 1.2
+        - min-height: 18px
+      windows:
+        - justify-self: start
+        - align-self: end
+
+  custom_fields:
+    # -----------------------------------------------------------------------
+    # Floor API v2 recommendation
+    # -----------------------------------------------------------------------
+    status: >-
+      [[[
+        const e = entity?.state || 'unknown';
+        return e === 'ventilate' ? 'Lüften' :
+               e === 'conditional' ? 'Bedingt lüften' :
+               e === 'keep_closed' ? 'Geschlossen halten' :
+               e === 'neutral' ? 'Neutral' :
+               'Nicht verfügbar';
+      ]]]
+
+    # -----------------------------------------------------------------------
+    # Window summary
+    # -----------------------------------------------------------------------
+    windows: >-
+      [[[
+        const ws = variables.opening_windows || variables.windows || [];
+        const open = ws.filter(e => hass.states[e]?.state === 'on').length;
+        const total = ws.length;
+        const txt = open ? `${open} offen · ${total} Öffnungen` : `${total} Öffnungen`;
+        const icon = open ? 'mdi:window-open-variant' : 'mdi:window-closed-variant';
+
+        return `<span style="display:inline-flex;gap:7px;align-items:center;border:1px solid ${variables.accent}66;background:${variables.accent}12;border-radius:12px;padding:6px 10px;font-size:12px;"><ha-icon icon="${icon}" style="width:16px;color:${variables.accent}"></ha-icon>${txt}</span>`;
+      ]]]
+
+    # -----------------------------------------------------------------------
+    # Dashboard control state + duration summary
+    # -----------------------------------------------------------------------
+    # This validates the same public contract expected by the Control blueprint:
+    # - Floor state is one of the four supported values
+    # - API version is 2
+    # - closing_windows is a subset of opening_windows
+    # - every opening window currently has an on/off state
+    #
+    # Duration is a Room API property. The Floor card therefore derives a
+    # single value or a range from the Room entities listed in the Floor
+    # sensor's room-bucket attributes.
+    substatus: >-
+      [[[
+        const floor = entity?.state || 'unknown';
+        const api = String(entity?.attributes?.api_version ?? '');
+
+        const opening = variables.opening_windows || variables.windows || [];
+        const configuredClosing = variables.closing_windows || [];
+        const closing = configuredClosing.length ? configuredClosing : opening;
+
+        const subset = closing.every(e => opening.includes(e));
+        const validWindows =
+          opening.length > 0 &&
+          opening.every(e => ['on', 'off'].includes(hass.states[e]?.state));
+
+        let control = 'unavailable';
+
+        if (
+          ['ventilate', 'conditional', 'keep_closed', 'neutral'].includes(floor) &&
+          api === '2' &&
+          subset &&
+          validWindows
+        ) {
+          const openOpening = opening.filter(e => hass.states[e]?.state === 'on').length;
+          const openClosing = closing.filter(e => hass.states[e]?.state === 'on').length;
+
+          control =
+            floor === 'ventilate' ? (openOpening > 0 ? 'ok' : 'open') :
+            floor === 'keep_closed' ? (openClosing > 0 ? 'close' : 'ok') :
+            floor;
+        }
+
+        const txt =
+          control === 'open' ? 'Fenster öffnen' :
+          control === 'close' ? 'Fenster schließen' :
+          control === 'ok' ? 'Fensterzustand passt' :
+          control === 'unavailable' ? 'Daten nicht verfügbar' :
+          control === 'conditional' ? 'Bedingte Empfehlung' :
+          '&nbsp;';
+
+        const color =
+          control === 'open' || control === 'close' ? '#ff6b6b' :
+          control === 'ok' ? '#76d39b' :
+          variables.accent;
+
+        const rooms = [
+          ...(entity?.attributes?.ventilate_rooms || []),
+          ...(entity?.attributes?.conditional_rooms || []),
+          ...(entity?.attributes?.keep_closed_rooms || []),
+          ...(entity?.attributes?.neutral_rooms || [])
+        ];
+
+        const durations = rooms
+          .map(e => Number(hass.states[e]?.attributes?.recommended_duration_minutes))
+          .filter(v => Number.isFinite(v) && v > 0);
+
+        let duration = '';
+        if (['ventilate', 'conditional'].includes(floor) && durations.length) {
+          const low = Math.min(...durations);
+          const high = Math.max(...durations);
+          duration =
+            low === high
+              ? ` · ${Math.round(low)} min`
+              : ` · ${Math.round(low)}–${Math.round(high)} min`;
+        }
+
+        return `<span style="color:${color}">${txt}${duration}</span>`;
+      ]]]
+
+  # -------------------------------------------------------------------------
+  # Status badge attached to the icon cell
+  # -------------------------------------------------------------------------
+  # The pseudo-element is anchored to #img-cell, not to absolute card pixels,
+  # so it follows the icon correctly on desktop and mobile layouts.
+  extra_styles: >-
+    [[[
+      const state = entity?.state || 'neutral';
+      const opening = variables.opening_windows || variables.windows || [];
+      const closing =
+        (variables.closing_windows && variables.closing_windows.length)
+          ? variables.closing_windows
+          : opening;
+
+      const openOpening = opening.filter(e => states[e]?.state === 'on').length;
+      const openClosing = closing.filter(e => states[e]?.state === 'on').length;
+
+      let symbol = '−';
+      let color = '#7f8a94';
+
+      if (state === 'ventilate') {
+        if (openOpening > 0) {
+          symbol = '✓';
+          color = '#66d58f';
+        } else {
+          symbol = '!';
+          color = '#ff5f64';
+        }
+      } else if (state === 'keep_closed') {
+        if (openClosing === 0) {
+          symbol = '✓';
+          color = '#66d58f';
+        } else {
+          symbol = '!';
+          color = '#ff5f64';
+        }
+      } else if (state === 'conditional') {
+        symbol = '?';
+        color = '#f2a83b';
+      } else if (state === 'neutral') {
+        symbol = '−';
+        color = '#7f8a94';
+      } else {
+        symbol = '!';
+        color = '#7f8a94';
+      }
+
+      return `#img-cell{position:relative;overflow:visible!important}#img-cell::after{content:'${symbol}';position:absolute;right:-5px;top:-5px;width:17px;height:17px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:${color};color:white;font-size:12px;font-weight:900;line-height:17px;box-shadow:0 0 0 2px var(--ha-card-background,var(--card-background-color));z-index:5;pointer-events:none}`;
+    ]]]
