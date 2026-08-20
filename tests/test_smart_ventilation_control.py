@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from tests.helpers import BLUEPRINT_ROOT, load_home_assistant_yaml
@@ -623,3 +625,46 @@ def test_runtime_variable_contract_is_preserved():
         "open_closing_windows",
     ):
         assert f"{name}:" in source
+
+def _template_trigger(document, trigger_id):
+    return next(
+        trigger
+        for trigger in document["triggers"]
+        if trigger.get("id") == trigger_id
+    )
+
+
+@pytest.mark.parametrize("trigger_id", ["close", "ok"])
+def test_closing_entities_is_bound_inside_trigger_scope(trigger_id):
+    """Trigger templates cannot see variables created later in actions."""
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+    template = _template_trigger(document, trigger_id)["value_template"]
+
+    assert "{% set closing_entities =" in template
+    assert "configured_closing_entities" in template
+    assert "opening_entities" in template
+
+
+def test_no_template_trigger_uses_closing_entities_without_local_binding():
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+
+    for trigger in document["triggers"]:
+        template = trigger.get("value_template")
+
+        if not template:
+            continue
+
+        # Match the standalone variable, not configured_closing_entities.
+        if not re.search(r"(?<!configured_)\bclosing_entities\b", template):
+            continue
+
+        assert "{% set closing_entities =" in template, (
+            f"trigger {trigger.get('id')} uses closing_entities "
+            "without defining it in trigger scope"
+        )
+
+
+def test_closing_entities_is_not_exposed_as_templated_trigger_variable():
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+
+    assert "closing_entities" not in document["trigger_variables"]

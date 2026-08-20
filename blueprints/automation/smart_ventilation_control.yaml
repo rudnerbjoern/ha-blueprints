@@ -287,9 +287,16 @@ triggers:
     for:
       seconds: !input demand_delay_seconds
 
+  # closing_entities is intentionally bound inside trigger templates that use it.
+  # Action variables do not exist yet while Home Assistant evaluates triggers.
   - trigger: template
     id: close
     value_template: >-
+      {% set closing_entities =
+        configured_closing_entities
+        if configured_closing_entities | count > 0
+        else opening_entities
+      %}
       {% set valid_floor_states = [
         'ventilate',
         'conditional',
@@ -327,7 +334,11 @@ triggers:
   - trigger: template
     id: ok
     value_template: >-
-      {% set valid_floor_states = [
+      {% set closing_entities =
+        configured_closing_entities
+        if configured_closing_entities | count > 0
+        else opening_entities
+      %}       {% set valid_floor_states = [
         'ventilate',
         'conditional',
         'keep_closed',
