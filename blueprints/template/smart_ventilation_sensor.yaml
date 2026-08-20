@@ -1,40 +1,70 @@
+# =============================================================================
+# Smart Ventilation Sensor
+# Room-level recommendation engine
+# =============================================================================
+#
+# Architecture:
+#   Sensors -> normalized measurements -> derived physical values
+#   -> recommendation decision tree -> diagnostics -> Template Sensor API v1
+#
+# This blueprint intentionally does not control windows or send notifications.
+# Those responsibilities belong to the floor aggregation and control layers.
+#
 blueprint:
   name: Smart Ventilation Sensor
   description: >
-    Creates a room-level ventilation recommendation based on indoor and
-    outdoor temperature and water vapor concentration.
+    Creates a room-level ventilation recommendation from indoor/outdoor
+    temperature and absolute water-vapor concentration.
 
-    The sensor evaluates whether ventilation is beneficial, thermally
-    unfavorable, unnecessary, or should be avoided. It also exposes
-    diagnostic attributes such as drying potential, relative humidity,
-    temperature difference, recommendation reason, and a suggested
-    purge-ventilation duration.
+    Public states:
+      ventilate
+        Ventilation is recommended.
+      conditional
+        Ventilation can be useful, but thermal conditions are unfavorable.
+      keep_closed
+        Windows should remain closed.
+      neutral
+        No meaningful ventilation advantage exists.
 
-    Sensor states:
-      ventilate   = Ventilation is recommended
-      conditional = Ventilation may be useful, but conditions are not ideal
-      keep_closed = Windows should remain closed
-      neutral     = No meaningful ventilation advantage exists
+    The sensor exposes Smart Ventilation Room API version 1. It also exposes
+    diagnostics such as drying potential, thermal condition, recommendation
+    reason, dry-air protection state, threshold configuration validity, and a
+    suggested purge-ventilation duration.
+
+    Required sensor inputs fail closed: when one is unavailable or non-numeric,
+    the resulting sensor becomes unavailable.
+
+    Threshold configuration also fails closed. The following relationships must
+    be true:
+      minimum_drying_potential <= strong_drying_potential
+      strong_drying_potential <= very_strong_drying_potential
+      warmer_outdoor_threshold <= much_warmer_outdoor_threshold
+      minimum_duration <= maximum_duration
+
+    Optional relative-humidity sensors are intentionally not used directly as
+    state-trigger entity IDs because an empty optional blueprint input is not a
+    valid entity ID. A one-minute reconciliation trigger therefore keeps
+    optional humidity diagnostics and dry-air protection current without making
+    the optional selector unsafe.
   domain: template
   author: Björn Rudner (@rudnerbjoern)
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/template/smart_ventilation_sensor.yaml
-
+  # Keep dev while the blueprint is under active development.
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/template/smart_ventilation_sensor.yaml
   homeassistant:
     min_version: "2024.11.0"
 
   input:
     sensors:
       name: Sensors
-      description: >
-        Select the indoor and outdoor climate sensors used to evaluate
-        ventilation conditions for this room.
+      description: Climate sensors used to evaluate this room.
       icon: mdi:thermometer-water
-
       input:
         indoor_temperature:
           name: Indoor temperature
           description: >
             Temperature sensor for the room being evaluated.
+            It is used together with the outdoor temperature to calculate the
+            thermal disadvantage of ventilation.
           selector:
             entity:
               filter:
@@ -43,10 +73,7 @@ blueprint:
 
         indoor_vapor_concentration:
           name: Indoor water vapor concentration
-          description: >
-            Sensor providing the absolute water vapor concentration of the
-            indoor air in g/m³. This is the primary indoor moisture value used
-            to determine the drying potential of ventilation.
+          description: Absolute indoor water-vapor concentration in g/m³.
           selector:
             entity:
               filter:
@@ -55,9 +82,8 @@ blueprint:
         indoor_relative_humidity:
           name: Indoor relative humidity
           description: >
-            Optional indoor relative-humidity sensor used for dry-air
-            protection. If configured, relative humidity is preferred over
-            the absolute vapor-concentration fallback threshold.
+            Optional. When configured, this value is preferred for indoor
+            dry-air protection.
           default: ""
           selector:
             entity:
@@ -68,9 +94,8 @@ blueprint:
         outdoor_temperature:
           name: Outdoor temperature
           description: >
-            Outdoor temperature sensor used to evaluate the thermal cost of
-            ventilation and to determine the suggested purge-ventilation
-            duration.
+            Outdoor temperature sensor used to evaluate the
+            thermal cost of ventilation and to select the base purge duration.
           selector:
             entity:
               filter:
@@ -79,10 +104,7 @@ blueprint:
 
         outdoor_vapor_concentration:
           name: Outdoor water vapor concentration
-          description: >
-            Sensor providing the absolute water vapor concentration of the
-            outdoor air in g/m³. Together with the indoor value, this is used
-            to calculate the drying potential.
+          description: Absolute outdoor water-vapor concentration in g/m³.
           selector:
             entity:
               filter:
@@ -91,9 +113,7 @@ blueprint:
         outdoor_relative_humidity:
           name: Outdoor relative humidity
           description: >
-            Optional outdoor relative-humidity sensor. The value is exposed as
-            a diagnostic attribute but does not currently influence the
-            ventilation recommendation.
+            Optional diagnostic value. It does not influence the recommendation.
           default: ""
           selector:
             entity:
@@ -104,18 +124,17 @@ blueprint:
     thresholds:
       name: Evaluation thresholds
       description: >
-        Advanced thresholds used to classify drying potential, thermal
-        disadvantage, and indoor dry-air protection.
+        Advanced thresholds. Invalid ordering makes the resulting sensor
+        unavailable instead of silently producing contradictory classifications.
       icon: mdi:tune
       collapsed: true
-
       input:
         minimum_drying_potential:
           name: Minimum drying potential
           description: >
-            Minimum indoor-minus-outdoor vapor concentration difference
-            required before ventilation is considered meaningfully useful.
-            Higher values reduce the number of ventilation recommendations.
+            Minimum indoor-minus-outdoor vapor
+            concentration difference required before ventilation is considered
+            meaningfully useful. Higher values reduce ventilation recommendations.
           default: 0.8
           selector:
             number:
@@ -128,9 +147,9 @@ blueprint:
         strong_drying_potential:
           name: Strong drying potential
           description: >
-            Drying-potential threshold at which outdoor air is considered
-            significantly drier than indoor air. Strong drying potential also
-            shortens the suggested ventilation duration.
+            Threshold at which the outdoor air is
+            considered significantly drier than indoor air. It also shortens the
+            suggested purge duration.
           default: 2.0
           selector:
             number:
@@ -143,9 +162,9 @@ blueprint:
         very_strong_drying_potential:
           name: Very strong drying potential
           description: >
-            Drying-potential threshold for exceptionally dry outdoor air.
-            Very strong drying potential can justify short conditional
-            ventilation even when outdoor air is substantially warmer.
+            Threshold for exceptionally dry outdoor
+            air. It can justify short conditional ventilation even when outdoor
+            air is substantially warmer.
           default: 4.0
           selector:
             number:
@@ -158,9 +177,9 @@ blueprint:
         warmer_outdoor_threshold:
           name: Warmer outdoor air threshold
           description: >
-            Outdoor-minus-indoor temperature difference from which outdoor air
-            is considered noticeably warmer. Ventilation with useful drying
-            potential becomes conditional above this threshold.
+            Outdoor-minus-indoor temperature difference
+            from which useful drying ventilation becomes conditional because of
+            thermal disadvantage.
           default: 1.0
           selector:
             number:
@@ -173,9 +192,9 @@ blueprint:
         much_warmer_outdoor_threshold:
           name: Much warmer outdoor air threshold
           description: >
-            Outdoor-minus-indoor temperature difference from which outdoor air
-            is considered strongly thermally unfavorable. Windows normally
-            remain closed unless the drying potential is very high.
+            Outdoor-minus-indoor temperature
+            difference from which windows normally remain closed unless drying
+            potential is exceptionally strong.
           default: 3.0
           selector:
             number:
@@ -188,9 +207,9 @@ blueprint:
         minimum_indoor_relative_humidity:
           name: Minimum indoor relative humidity
           description: >
-            Below this relative-humidity threshold, further drying ventilation
-            is suppressed to help avoid excessively dry indoor air, especially
-            during cold weather.
+            Below this indoor relative-humidity
+            value, further drying ventilation is suppressed when it would remove
+            additional moisture.
           default: 35
           selector:
             number:
@@ -203,8 +222,8 @@ blueprint:
         minimum_indoor_vapor:
           name: Minimum indoor vapor concentration
           description: >
-            Fallback dry-air protection threshold in g/m³. This threshold is
-            only used when no indoor relative-humidity sensor is configured.
+            Fallback dry-air threshold used only when no indoor RH sensor is
+            configured.
           default: 5.5
           selector:
             number:
@@ -217,20 +236,16 @@ blueprint:
     ventilation_duration:
       name: Ventilation duration
       description: >
-        Configure the base purge-ventilation durations and the allowed minimum
-        and maximum suggested duration. The final duration is adjusted using
-        drying potential and thermal disadvantage.
-
-        The result is an estimate and not a calculated air-exchange time.
+        Base purge-ventilation durations. The final suggestion is adjusted by
+        drying potential and thermal disadvantage, then clamped between the
+        configured minimum and maximum.
       icon: mdi:timer-outline
       collapsed: true
-
       input:
         duration_below_zero:
           name: Base duration below 0 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is
-            below 0 °C.
+            Base purge-ventilation duration below 0 °C outdoor temperature.
           default: 4
           selector:
             number:
@@ -243,8 +258,7 @@ blueprint:
         duration_zero_to_five:
           name: Base duration from 0 to 5 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is at
-            least 0 °C and below 5 °C.
+            Base purge duration from 0 °C up to, but not including, 5 °C.
           default: 5
           selector:
             number:
@@ -257,8 +271,7 @@ blueprint:
         duration_five_to_ten:
           name: Base duration from 5 to 10 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is at
-            least 5 °C and below 10 °C.
+            Base purge duration from 5 °C up to, but not including, 10 °C.
           default: 7
           selector:
             number:
@@ -271,8 +284,7 @@ blueprint:
         duration_ten_to_fifteen:
           name: Base duration from 10 to 15 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is at
-            least 10 °C and below 15 °C.
+            Base purge duration from 10 °C up to, but not including, 15 °C.
           default: 10
           selector:
             number:
@@ -285,8 +297,7 @@ blueprint:
         duration_fifteen_to_twenty:
           name: Base duration from 15 to 20 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is at
-            least 15 °C and below 20 °C.
+            Base purge duration from 15 °C up to, but not including, 20 °C.
           default: 15
           selector:
             number:
@@ -297,10 +308,9 @@ blueprint:
               mode: slider
 
         duration_above_twenty:
-          name: Base duration above 20 °C
+          name: Base duration at or above 20 °C
           description: >
-            Base purge-ventilation duration when the outdoor temperature is
-            20 °C or higher.
+            Base purge duration at 20 °C outdoor temperature or warmer.
           default: 20
           selector:
             number:
@@ -313,7 +323,7 @@ blueprint:
         minimum_duration:
           name: Minimum suggested duration
           description: >
-            Lower bound for the calculated purge-ventilation duration.
+            Lower bound for the calculated whole-minute purge duration.
           default: 2
           selector:
             number:
@@ -326,7 +336,7 @@ blueprint:
         maximum_duration:
           name: Maximum suggested duration
           description: >
-            Upper bound for the calculated purge-ventilation duration.
+            Upper bound for the calculated whole-minute purge duration.
           default: 30
           selector:
             number:
@@ -336,91 +346,153 @@ blueprint:
               unit_of_measurement: min
               mode: slider
 
+# =============================================================================
+# Triggers
+# =============================================================================
+#
+# Required sensors trigger immediately on state changes.
+# Optional relative-humidity inputs cannot safely be referenced directly when
+# left empty, therefore a one-minute reconciliation trigger refreshes them.
+#
 triggers:
   - trigger: homeassistant
     event: start
-
+    id: homeassistant_start
   - trigger: state
     entity_id: !input indoor_temperature
-
+    id: indoor_temperature
   - trigger: state
     entity_id: !input indoor_vapor_concentration
-
+    id: indoor_vapor
   - trigger: state
     entity_id: !input outdoor_temperature
-
+    id: outdoor_temperature
   - trigger: state
     entity_id: !input outdoor_vapor_concentration
-
+    id: outdoor_vapor
   - trigger: time_pattern
-    minutes: "/5"
+    minutes: "/1"
+    id: reconcile
 
+# =============================================================================
+# Calculation pipeline
+# =============================================================================
+#
+# The variables below are intentionally split into stages:
+#   1. Bind blueprint inputs
+#   2. Validate sources and configuration
+#   3. Normalize measurements
+#   4. Derive physical values
+#   5. Classify drying/thermal conditions
+#   6. Choose recommendation + reason
+#   7. Estimate whole-minute purge duration
+#
 actions:
-  # Bind blueprint inputs to variables so they can safely be used in templates.
+  # ---------------------------------------------------------------------------
+  # Stage 1: Bind blueprint inputs to template-safe variables.
+  # !input tags are YAML constructs and must not be referenced directly inside
+  # Jinja templates.
+  # ---------------------------------------------------------------------------
   - variables:
       indoor_temperature_entity: !input indoor_temperature
       indoor_vapor_entity: !input indoor_vapor_concentration
       indoor_humidity_entity: !input indoor_relative_humidity
-
       outdoor_temperature_entity: !input outdoor_temperature
       outdoor_vapor_entity: !input outdoor_vapor_concentration
       outdoor_humidity_entity: !input outdoor_relative_humidity
-
       minimum_drying_potential_value: !input minimum_drying_potential
       strong_drying_potential_value: !input strong_drying_potential
       very_strong_drying_potential_value: !input very_strong_drying_potential
-
       warmer_outdoor_threshold_value: !input warmer_outdoor_threshold
       much_warmer_outdoor_threshold_value: !input much_warmer_outdoor_threshold
-
       minimum_indoor_relative_humidity_value: !input minimum_indoor_relative_humidity
       minimum_indoor_vapor_value: !input minimum_indoor_vapor
-
       duration_below_zero_value: !input duration_below_zero
       duration_zero_to_five_value: !input duration_zero_to_five
       duration_five_to_ten_value: !input duration_five_to_ten
       duration_ten_to_fifteen_value: !input duration_ten_to_fifteen
       duration_fifteen_to_twenty_value: !input duration_fifteen_to_twenty
       duration_above_twenty_value: !input duration_above_twenty
-
       minimum_duration_value: !input minimum_duration
       maximum_duration_value: !input maximum_duration
 
-  # Read primary climate values and determine whether optional RH inputs are valid.
+  # ---------------------------------------------------------------------------
+  # Stage 2: Validate required sensor values and configuration ordering.
+  # A contradictory threshold configuration is treated as unavailable instead
+  # of producing an ambiguous or silently wrong recommendation.
+  # ---------------------------------------------------------------------------
   - variables:
-      ti: "{{ states(indoor_temperature_entity) | float(0) }}"
-      vi: "{{ states(indoor_vapor_entity) | float(0) }}"
-
-      ta: "{{ states(outdoor_temperature_entity) | float(0) }}"
-      va: "{{ states(outdoor_vapor_entity) | float(0) }}"
-
+      required_sensors_valid: >-
+        {{
+          is_number(states(indoor_temperature_entity))
+          and is_number(states(indoor_vapor_entity))
+          and is_number(states(outdoor_temperature_entity))
+          and is_number(states(outdoor_vapor_entity))
+        }}
       indoor_humidity_available: >-
         {{
           indoor_humidity_entity | trim != ''
           and is_number(states(indoor_humidity_entity))
         }}
-
       outdoor_humidity_available: >-
         {{
           outdoor_humidity_entity | trim != ''
           and is_number(states(outdoor_humidity_entity))
         }}
+      configuration_errors: >-
+        {% set ns = namespace(errors=[]) %}
+        {% if minimum_drying_potential_value | float
+              > strong_drying_potential_value | float %}
+          {% set ns.errors = ns.errors
+            + ['minimum_drying_exceeds_strong_drying'] %}
+        {% endif %}
+        {% if strong_drying_potential_value | float
+              > very_strong_drying_potential_value | float %}
+          {% set ns.errors = ns.errors
+            + ['strong_drying_exceeds_very_strong_drying'] %}
+        {% endif %}
+        {% if warmer_outdoor_threshold_value | float
+              > much_warmer_outdoor_threshold_value | float %}
+          {% set ns.errors = ns.errors
+            + ['warmer_threshold_exceeds_much_warmer_threshold'] %}
+        {% endif %}
+        {% if minimum_duration_value | float
+              > maximum_duration_value | float %}
+          {% set ns.errors = ns.errors
+            + ['minimum_duration_exceeds_maximum_duration'] %}
+        {% endif %}
+        {{ ns.errors }}
 
-  # Calculate basic temperature and moisture values.
+  # ---------------------------------------------------------------------------
+  # Stage 3: Normalize required numeric measurements.
+  # float(0) is safe here because availability independently rejects invalid
+  # required source states.
+  # ---------------------------------------------------------------------------
   - variables:
-      temperature_difference_value: >-
-        {{ (ta | float) - (ti | float) }}
+      configuration_valid: "{{ configuration_errors | count == 0 }}"
+      ti: "{{ states(indoor_temperature_entity) | float(0) }}"
+      vi: "{{ states(indoor_vapor_entity) | float(0) }}"
+      ta: "{{ states(outdoor_temperature_entity) | float(0) }}"
+      va: "{{ states(outdoor_vapor_entity) | float(0) }}"
 
-      drying_potential_value: >-
-        {{ (vi | float) - (va | float) }}
-
+  # ---------------------------------------------------------------------------
+  # Stage 4: Derive the two core physical values.
+  #
+  # temperature_difference = outdoor - indoor
+  #   positive -> outdoor air is warmer
+  #
+  # drying_potential = indoor vapor - outdoor vapor
+  #   positive -> outdoor air is drier and can remove moisture
+  # ---------------------------------------------------------------------------
+  - variables:
+      temperature_difference_value: "{{ (ta | float) - (ti | float) }}"
+      drying_potential_value: "{{ (vi | float) - (va | float) }}"
       indoor_relative_humidity_value: >-
         {% if indoor_humidity_available %}
           {{ states(indoor_humidity_entity) | float }}
         {% else %}
           {{ none }}
         {% endif %}
-
       outdoor_relative_humidity_value: >-
         {% if outdoor_humidity_available %}
           {{ states(outdoor_humidity_entity) | float }}
@@ -428,31 +500,37 @@ actions:
           {{ none }}
         {% endif %}
 
-  # Classify dry-air protection, drying potential, and thermal conditions.
+  # ---------------------------------------------------------------------------
+  # Stage 5: Classify dry-air protection, drying strength and thermal condition.
+  # Indoor RH is preferred when configured; absolute vapor concentration is the
+  # fallback protection source.
+  # ---------------------------------------------------------------------------
   - variables:
       dry_air_protection: >-
         {% if indoor_humidity_available %}
           {{
             indoor_relative_humidity_value | float
-            < minimum_indoor_relative_humidity_value
+            < minimum_indoor_relative_humidity_value | float
           }}
         {% else %}
-          {{ vi | float < minimum_indoor_vapor_value }}
+          {{ vi | float < minimum_indoor_vapor_value | float }}
         {% endif %}
-
       drying_potential_level_value: >-
-        {% if drying_potential_value | float >= very_strong_drying_potential_value %}
+        {% if drying_potential_value | float
+              >= very_strong_drying_potential_value | float %}
           very_high
-        {% elif drying_potential_value | float >= strong_drying_potential_value %}
+        {% elif drying_potential_value | float
+              >= strong_drying_potential_value | float %}
           high
-        {% elif drying_potential_value | float >= minimum_drying_potential_value %}
+        {% elif drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           moderate
-        {% elif drying_potential_value | float <= (0 - minimum_drying_potential_value) %}
+        {% elif drying_potential_value | float
+              <= (0 - minimum_drying_potential_value | float) %}
           negative
         {% else %}
           low
         {% endif %}
-
       thermal_condition_value: >-
         {% if ta | float < 0 %}
           very_cold
@@ -462,132 +540,97 @@ actions:
           cool
         {% elif ta | float < 15 %}
           mild
-        {% elif
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float %}
           much_warmer
-        {% elif
-          temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float %}
           warmer
         {% else %}
           comfortable
         {% endif %}
 
-  # Determine the recommendation and its machine-readable reason code.
+  # ---------------------------------------------------------------------------
+  # Stage 6: Recommendation decision tree.
+  #
+  # Order is significant:
+  #   dry-air protection -> wetter outside -> much warmer exceptions
+  #   -> warmer conditional -> useful drying -> warm/no benefit -> neutral
+  # ---------------------------------------------------------------------------
   - variables:
       recommendation: >-
-        {% if
-          dry_air_protection
-          and drying_potential_value | float >= minimum_drying_potential_value
-        %}
+        {% if dry_air_protection | bool
+              and drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           keep_closed
-
-        {% elif
-          drying_potential_value | float
-          <= (0 - minimum_drying_potential_value)
-        %}
+        {% elif drying_potential_value | float
+              <= (0 - minimum_drying_potential_value | float) %}
           keep_closed
-
-        {% elif
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-          and drying_potential_value | float
-          >= very_strong_drying_potential_value
-        %}
+        {% elif temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float
+              and drying_potential_value | float
+              >= very_strong_drying_potential_value | float %}
           conditional
-
-        {% elif
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float %}
           keep_closed
-
-        {% elif
-          drying_potential_value | float >= minimum_drying_potential_value
-          and temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float
+              and drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           conditional
-
-        {% elif
-          drying_potential_value | float >= minimum_drying_potential_value
-        %}
+        {% elif drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           ventilate
-
-        {% elif
-          temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float %}
           keep_closed
-
         {% else %}
           neutral
         {% endif %}
-
       recommendation_reason: >-
-        {% if
-          dry_air_protection
-          and drying_potential_value | float >= minimum_drying_potential_value
-        %}
+        {% if dry_air_protection | bool
+              and drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           indoor_air_already_dry
-
-        {% elif
-          drying_potential_value | float
-          <= (0 - minimum_drying_potential_value)
-        %}
+        {% elif drying_potential_value | float
+              <= (0 - minimum_drying_potential_value | float) %}
           outdoor_air_more_humid
-
-        {% elif
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-          and drying_potential_value | float
-          >= very_strong_drying_potential_value
-        %}
+        {% elif temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float
+              and drying_potential_value | float
+              >= very_strong_drying_potential_value | float %}
           strong_drying_benefit_but_much_warmer
-
-        {% elif
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float %}
           outdoor_air_much_warmer
-
-        {% elif
-          drying_potential_value | float >= minimum_drying_potential_value
-          and temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float
+              and drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           outdoor_air_drier_but_warmer
-
-        {% elif
-          drying_potential_value | float >= very_strong_drying_potential_value
-          and ta | float < 5
-        %}
+        {% elif drying_potential_value | float
+              >= very_strong_drying_potential_value | float
+              and ta | float < 5 %}
           outdoor_air_much_drier_and_cold
-
-        {% elif
-          drying_potential_value | float >= strong_drying_potential_value
-        %}
+        {% elif drying_potential_value | float
+              >= strong_drying_potential_value | float %}
           outdoor_air_significantly_drier
-
-        {% elif
-          drying_potential_value | float >= minimum_drying_potential_value
-        %}
+        {% elif drying_potential_value | float
+              >= minimum_drying_potential_value | float %}
           outdoor_air_drier
-
-        {% elif
-          temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float %}
           outdoor_air_warmer_without_drying_benefit
-
         {% else %}
           conditions_similar
         {% endif %}
 
-  # Determine the base purge-ventilation duration and correction factors.
+  # ---------------------------------------------------------------------------
+  # Stage 7: Estimate purge-ventilation duration.
+  # The result is intentionally whole minutes only. This is a recommendation,
+  # not a second-accurate air-exchange calculation.
+  # ---------------------------------------------------------------------------
   - variables:
       base_duration: >-
         {% if ta | float < 0 %}
@@ -603,32 +646,27 @@ actions:
         {% else %}
           {{ duration_above_twenty_value }}
         {% endif %}
-
       drying_factor: >-
-        {% if drying_potential_value | float >= very_strong_drying_potential_value %}
+        {% if drying_potential_value | float
+              >= very_strong_drying_potential_value | float %}
           0.70
-        {% elif drying_potential_value | float >= strong_drying_potential_value %}
+        {% elif drying_potential_value | float
+              >= strong_drying_potential_value | float %}
           0.85
         {% else %}
           1.00
         {% endif %}
-
       thermal_factor: >-
-        {% if
-          temperature_difference_value | float
-          >= much_warmer_outdoor_threshold_value
-        %}
+        {% if temperature_difference_value | float
+              >= much_warmer_outdoor_threshold_value | float %}
           0.50
-        {% elif
-          temperature_difference_value | float
-          >= warmer_outdoor_threshold_value
-        %}
+        {% elif temperature_difference_value | float
+              >= warmer_outdoor_threshold_value | float %}
           0.65
         {% else %}
           1.00
         {% endif %}
 
-  # Calculate and bound the suggested duration.
   - variables:
       calculated_duration: >-
         {{
@@ -640,7 +678,6 @@ actions:
           | round(0)
           | int
         }}
-
       bounded_duration: >-
         {{
           [
@@ -652,7 +689,6 @@ actions:
           ] | min
         }}
 
-  # Duration attributes are only meaningful when ventilation is recommended.
   - variables:
       recommended_duration_minutes_value: >-
         {% if recommendation in ['ventilate', 'conditional'] %}
@@ -661,24 +697,21 @@ actions:
           {{ none }}
         {% endif %}
 
-      recommended_duration_seconds_value: >-
-        {% if recommendation in ['ventilate', 'conditional'] %}
-          {{ (bounded_duration | int) * 60 }}
-        {% else %}
-          {{ none }}
-        {% endif %}
-
+# =============================================================================
+# Public Template Sensor API
+# =============================================================================
+#
+# API version 1 exposes the recommendation state plus diagnostic attributes.
+# Availability fails closed if required sensors are invalid or the configured
+# threshold ordering is contradictory.
+#
 sensor:
   availability: >-
     {{
-      is_number(states(indoor_temperature_entity))
-      and is_number(states(indoor_vapor_entity))
-      and is_number(states(outdoor_temperature_entity))
-      and is_number(states(outdoor_vapor_entity))
+      required_sensors_valid | bool
+      and configuration_valid | bool
     }}
-
   state: "{{ recommendation }}"
-
   icon: >-
     {% if recommendation == 'ventilate' %}
       mdi:window-open-variant
@@ -689,54 +722,26 @@ sensor:
     {% else %}
       mdi:air-filter
     {% endif %}
-
   attributes:
     api_version: "1"
-
     reason: "{{ recommendation_reason }}"
-
-    indoor_temperature: >-
-      {{ ti | float | round(1) }}
-
-    outdoor_temperature: >-
-      {{ ta | float | round(1) }}
-
-    temperature_difference: >-
-      {{ temperature_difference_value | float | round(1) }}
-
-    indoor_vapor_concentration: >-
-      {{ vi | float | round(2) }}
-
-    outdoor_vapor_concentration: >-
-      {{ va | float | round(2) }}
-
-    drying_potential: >-
-      {{ drying_potential_value | float | round(2) }}
-
-    drying_potential_level: >-
-      {{ drying_potential_level_value }}
-
-    indoor_relative_humidity: >-
-      {{ indoor_relative_humidity_value }}
-
-    outdoor_relative_humidity: >-
-      {{ outdoor_relative_humidity_value }}
-
-    dry_air_protection_active: >-
-      {{ dry_air_protection }}
-
+    configuration_valid: "{{ configuration_valid | bool }}"
+    configuration_errors: "{{ configuration_errors }}"
+    indoor_temperature: "{{ ti | float | round(1) }}"
+    outdoor_temperature: "{{ ta | float | round(1) }}"
+    temperature_difference: "{{ temperature_difference_value | float | round(1) }}"
+    indoor_vapor_concentration: "{{ vi | float | round(2) }}"
+    outdoor_vapor_concentration: "{{ va | float | round(2) }}"
+    drying_potential: "{{ drying_potential_value | float | round(2) }}"
+    drying_potential_level: "{{ drying_potential_level_value }}"
+    indoor_relative_humidity: "{{ indoor_relative_humidity_value }}"
+    outdoor_relative_humidity: "{{ outdoor_relative_humidity_value }}"
+    dry_air_protection_active: "{{ dry_air_protection | bool }}"
     dry_air_protection_source: >-
       {% if indoor_humidity_available %}
         relative_humidity
       {% else %}
         vapor_concentration
       {% endif %}
-
-    thermal_condition: >-
-      {{ thermal_condition_value }}
-
-    recommended_duration_minutes: >-
-      {{ recommended_duration_minutes_value }}
-
-    recommended_duration_seconds: >-
-      {{ recommended_duration_seconds_value }}
+    thermal_condition: "{{ thermal_condition_value }}"
+    recommended_duration_minutes: "{{ recommended_duration_minutes_value }}"

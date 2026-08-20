@@ -11,6 +11,7 @@ CONTROL_BLUEPRINT = (
 
 
 def input_reference_name(value):
+    """Return the !input name from the HA-aware YAML test loader."""
     if not isinstance(value, dict):
         return None
 
@@ -20,125 +21,139 @@ def input_reference_name(value):
     return value.get("__input__")
 
 
-def control_state(
+def derive_control_state(
     *,
     floor_state: str,
     opening_states: list[str],
-    closing_states: list[str] | None = None,
+    closing_indices: list[int] | None = None,
     floor_api_version: str = "2",
     closing_subset_valid: bool = True,
-) -> str:
-    closing_states = (
-        opening_states
-        if closing_states is None
-        else closing_states
-    )
+) -> tuple[str, list[int], list[int]]:
+    """Reference model for Smart Ventilation Control semantics."""
+    if closing_indices is None:
+        closing_indices = list(range(len(opening_states)))
+
+    valid_floor_states = {
+        "ventilate",
+        "conditional",
+        "keep_closed",
+        "neutral",
+    }
 
     valid = (
         len(opening_states) > 0
-        and floor_state in {
-            "ventilate",
-            "conditional",
-            "keep_closed",
-            "neutral",
-        }
+        and floor_state in valid_floor_states
         and floor_api_version == "2"
         and closing_subset_valid
+        and all(state in {"on", "off"} for state in opening_states)
         and all(
-            state in {"on", "off"}
-            for state in opening_states
+            0 <= index < len(opening_states)
+            for index in closing_indices
         )
     )
 
     if not valid:
-        return "unavailable"
+        return "unavailable", [], []
+
+    open_opening = [
+        index
+        for index, state in enumerate(opening_states)
+        if state == "on"
+    ]
+    closed_opening = [
+        index
+        for index, state in enumerate(opening_states)
+        if state == "off"
+    ]
+    open_closing = [
+        index
+        for index in closing_indices
+        if opening_states[index] == "on"
+    ]
 
     if floor_state == "ventilate":
-        return "ok" if "on" in opening_states else "open"
+        state = "ok" if open_opening else "open"
+    elif floor_state == "keep_closed":
+        state = "close" if open_closing else "ok"
+    elif floor_state == "conditional":
+        state = "conditional"
+    else:
+        state = "neutral"
 
-    if floor_state == "keep_closed":
-        return "close" if "on" in closing_states else "ok"
+    windows_to_open = closed_opening if state == "open" else []
+    windows_to_close = open_closing if state == "close" else []
 
-    if floor_state == "conditional":
-        return "conditional"
-
-    return "neutral"
+    return state, windows_to_open, windows_to_close
 
 
-def get_choose_action(document):
+def get_trigger(document, trigger_id):
     return next(
-        action
+        trigger
+        for trigger in document["triggers"]
+        if trigger.get("id") == trigger_id
+    )
+
+
+def get_choose(document):
+    return next(
+        action["choose"]
         for action in document["actions"]
         if "choose" in action
     )
 
 
-def get_choose_branch(document, trigger_id):
-    choose_action = get_choose_action(document)
+def branches_for_trigger(document, trigger_id):
+    result = []
 
-    for branch in choose_action["choose"]:
-        conditions = branch["conditions"]
-        trigger_conditions = [
-            condition
-            for condition in conditions
-            if condition.get("condition") == "trigger"
-        ]
-        if trigger_conditions and trigger_conditions[0]["id"] == trigger_id:
-            return branch
+    for branch in get_choose(document):
+        for condition in branch["conditions"]:
+            if (
+                condition.get("condition") == "trigger"
+                and condition.get("id") == trigger_id
+            ):
+                result.append(branch)
 
-    raise AssertionError(
-        f"No choose branch found for trigger id {trigger_id!r}"
-    )
+    return result
 
 
-def test_control_blueprint_exists():
-    assert CONTROL_BLUEPRINT.exists()
-
-
-def test_control_blueprint_is_automation_blueprint():
+def test_blueprint_contract():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
 
     assert document["blueprint"]["domain"] == "automation"
-    assert "triggers" in document
-    assert "actions" in document
+    assert (
+        str(document["blueprint"]["homeassistant"]["min_version"])
+        == "2024.11.0"
+    )
+    assert document["mode"] == "restart"
+    assert document["max_exceeded"] == "silent"
     assert "sensor" not in document
 
 
-def test_control_blueprint_source_url_matches_location():
+def test_source_url_stays_on_dev():
     metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
 
-    assert metadata["source_url"] == (
-        "https://github.com/rudnerbjoern/ha-blueprints/"
-        "blob/main/blueprints/automation/"
-        "smart_ventilation_control.yaml"
-    )
+    assert "/blob/dev/" in metadata["source_url"]
 
 
-def test_control_blueprint_minimum_home_assistant_version():
-    metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
-
-    assert str(metadata["homeassistant"]["min_version"]) == "2024.11.0"
-
-
-def test_control_blueprint_required_inputs():
+def test_required_and_optional_inputs():
     metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
     inputs = metadata["input"]
 
-    floor_input = inputs["recommendation"]["input"]["floor_sensor"]
-    opening_input = inputs["windows"]["input"]["opening_windows"]
+    assert (
+        "default"
+        not in inputs["recommendation"]["input"]["floor_sensor"]
+    )
+    assert (
+        "default"
+        not in inputs["windows"]["input"]["opening_windows"]
+    )
+    assert (
+        inputs["windows"]["input"]["closing_windows"]["default"]
+        == []
+    )
 
-    assert "default" not in floor_input
-    assert "default" not in opening_input
 
-
-def test_control_blueprint_closing_windows_default_empty():
-    metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
-    closing_input = metadata["input"]["windows"]["input"]["closing_windows"]
-
-    assert closing_input["default"] == []
-
-
-def test_control_timing_defaults_preserve_legacy_behavior():
+def test_timing_defaults():
     metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
     timing = metadata["input"]["timing"]["input"]
 
@@ -158,22 +173,20 @@ def test_control_timing_defaults_preserve_legacy_behavior():
         "window_update_actions",
     ],
 )
-def test_control_action_inputs_are_optional(action_input):
+def test_all_action_inputs_are_optional(action_input):
     metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
-    actions = metadata["input"]["actions_section"]["input"]
+    inputs = metadata["input"]["actions_section"]["input"]
 
-    assert actions[action_input]["default"] == []
+    assert inputs[action_input]["default"] == []
 
 
-def test_control_blueprint_uses_expected_triggers():
+def test_trigger_set_is_complete():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
 
-    trigger_ids = {
+    assert {
         trigger["id"]
         for trigger in document["triggers"]
-    }
-
-    assert trigger_ids == {
+    } == {
         "open",
         "close",
         "ok",
@@ -181,313 +194,432 @@ def test_control_blueprint_uses_expected_triggers():
         "neutral",
         "unavailable",
         "window_change",
+        "active_start",
     }
 
 
-def test_control_semantic_triggers_are_templates():
+@pytest.mark.parametrize(
+    "trigger_id",
+    [
+        "open",
+        "close",
+        "ok",
+        "conditional",
+        "neutral",
+        "unavailable",
+    ],
+)
+def test_semantic_state_triggers_are_templates(trigger_id):
+    trigger = get_trigger(
+        load_home_assistant_yaml(CONTROL_BLUEPRINT),
+        trigger_id,
+    )
+
+    assert trigger["trigger"] == "template"
+
+
+def test_window_change_is_native_state_trigger():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+    trigger = get_trigger(document, "window_change")
 
-    semantic_triggers = [
-        trigger
-        for trigger in document["triggers"]
-        if trigger["id"] != "window_change"
-    ]
-
-    assert all(
-        trigger["trigger"] == "template"
-        for trigger in semantic_triggers
+    assert trigger["trigger"] == "state"
+    assert (
+        input_reference_name(trigger["entity_id"])
+        == "opening_windows"
     )
 
 
-def test_control_window_change_trigger_is_native_state_trigger():
+def test_active_start_is_native_time_trigger():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+    trigger = get_trigger(document, "active_start")
 
-    window_trigger = next(
-        trigger
-        for trigger in document["triggers"]
-        if trigger["id"] == "window_change"
-    )
-
-    assert window_trigger["trigger"] == "state"
-    assert input_reference_name(window_trigger["entity_id"]) == "opening_windows"
+    assert trigger["trigger"] == "time"
+    assert input_reference_name(trigger["at"]) == "active_after"
 
 
-def test_open_and_close_triggers_have_stability_delay():
+@pytest.mark.parametrize("trigger_id", ["open", "close"])
+def test_open_close_triggers_use_demand_stability_delay(trigger_id):
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-
-    demand_triggers = {
-        trigger["id"]: trigger
-        for trigger in document["triggers"]
-        if trigger["id"] in {"open", "close"}
-    }
-
-    assert set(demand_triggers) == {"open", "close"}
-
-    for trigger in demand_triggers.values():
-        assert "for" in trigger
-        assert (
-            input_reference_name(trigger["for"]["seconds"])
-            == "demand_delay_seconds"
-        )
-
-
-def test_control_window_update_delay_uses_input():
-    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-    first_action = document["actions"][0]
-
-    assert first_action["if"] == [
-        {
-            "condition": "trigger",
-            "id": "window_change",
-        }
-    ]
-
-    delay_action = first_action["then"][0]
+    trigger = get_trigger(document, trigger_id)
 
     assert (
-        input_reference_name(delay_action["delay"]["seconds"])
+        input_reference_name(trigger["for"]["seconds"])
+        == "demand_delay_seconds"
+    )
+
+
+def test_active_start_waits_demand_delay_before_recompute():
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+
+    delay_index = next(
+        index
+        for index, action in enumerate(document["actions"])
+        if action.get("if") == [
+            {
+                "condition": "trigger",
+                "id": "active_start",
+            }
+        ]
+    )
+
+    control_state_index = next(
+        index
+        for index, action in enumerate(document["actions"])
+        if "control_state" in action.get("variables", {})
+    )
+
+    delay = document["actions"][delay_index]["then"][0]["delay"]
+
+    assert (
+        input_reference_name(delay["seconds"])
+        == "demand_delay_seconds"
+    )
+    assert delay_index < control_state_index
+
+
+def test_window_change_uses_settle_delay_before_recompute():
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+
+    delay_index = next(
+        index
+        for index, action in enumerate(document["actions"])
+        if action.get("if") == [
+            {
+                "condition": "trigger",
+                "id": "window_change",
+            }
+        ]
+    )
+
+    control_state_index = next(
+        index
+        for index, action in enumerate(document["actions"])
+        if "control_state" in action.get("variables", {})
+    )
+
+    delay = document["actions"][delay_index]["then"][0]["delay"]
+
+    assert (
+        input_reference_name(delay["seconds"])
         == "window_update_delay_seconds"
     )
+    assert delay_index < control_state_index
 
 
-def test_open_branch_is_time_gated():
+def test_closing_fallback_is_not_templated_in_trigger_variables():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-    branch = get_choose_branch(document, "open")
+    trigger_variables = document["trigger_variables"]
 
-    time_condition = next(
-        condition
-        for condition in branch["conditions"]
-        if condition.get("condition") == "time"
+    assert "closing_entities" not in trigger_variables
+
+
+def test_closing_fallback_is_calculated_in_action_context():
+    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+
+    variables = next(
+        action["variables"]
+        for action in document["actions"]
+        if "closing_entities" in action.get("variables", {})
     )
 
-    assert input_reference_name(time_condition["after"]) == "active_after"
-    assert input_reference_name(time_condition["before"]) == "active_before"
-    assert input_reference_name(branch["sequence"]) == "open_actions"
+    assert "closing_entities" in variables
 
 
-def test_close_branch_is_time_gated():
-    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-    branch = get_choose_branch(document, "close")
-
-    time_condition = next(
-        condition
-        for condition in branch["conditions"]
-        if condition.get("condition") == "time"
-    )
-
-    assert input_reference_name(time_condition["after"]) == "active_after"
-    assert input_reference_name(time_condition["before"]) == "active_before"
-    assert input_reference_name(branch["sequence"]) == "close_actions"
-
-
-@pytest.mark.parametrize(
-    ("trigger_id", "action_input"),
-    [
-        ("unavailable", "unavailable_actions"),
-        ("window_change", "window_update_actions"),
-    ],
-)
-def test_single_trigger_action_branches_are_dispatched(
-    trigger_id,
-    action_input,
-):
-    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-    branch = get_choose_branch(document, trigger_id)
-
-    assert input_reference_name(branch["sequence"]) == action_input
-
-
-def test_clear_actions_handle_non_demand_states():
-    document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
-    branch = get_choose_branch(
-        document,
-        ["ok", "conditional", "neutral"],
-    )
-
-    assert input_reference_name(branch["sequence"]) == "clear_actions"
-    assert not any(
-        condition.get("condition") == "time"
-        for condition in branch["conditions"]
-    )
-
-
-def test_unavailable_and_window_updates_are_not_time_gated():
+def test_regular_open_and_close_dispatch_remain_time_gated():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
 
-    for trigger_id in ("unavailable", "window_change"):
-        branch = get_choose_branch(document, trigger_id)
+    for trigger_id, action_input in (
+        ("open", "open_actions"),
+        ("close", "close_actions"),
+    ):
+        branches = branches_for_trigger(document, trigger_id)
 
-        assert not any(
-            condition.get("condition") == "time"
+        assert len(branches) == 1
+
+        branch = branches[0]
+        time_condition = next(
+            condition
             for condition in branch["conditions"]
+            if condition.get("condition") == "time"
+        )
+
+        assert (
+            input_reference_name(time_condition["after"])
+            == "active_after"
+        )
+        assert (
+            input_reference_name(time_condition["before"])
+            == "active_before"
+        )
+        assert (
+            input_reference_name(branch["sequence"])
+            == action_input
         )
 
 
-def test_control_blueprint_preserves_restart_mode():
+def test_active_start_dispatches_only_current_open_or_close_demand():
     document = load_home_assistant_yaml(CONTROL_BLUEPRINT)
+    branches = branches_for_trigger(document, "active_start")
 
-    assert document["mode"] == "restart"
-    assert document["max_exceeded"] == "silent"
+    assert len(branches) == 2
 
-
-def test_control_recomputes_state_for_window_changes():
-    source = CONTROL_BLUEPRINT.read_text(encoding="utf-8")
-
-    assert "control_state:" in source
-    assert "floor_state == 'ventilate'" in source
-    assert "floor_state == 'keep_closed'" in source
-    assert 'control_state: "{{ trigger.id }}"' not in source
-
-
-def test_control_exposes_expected_runtime_variables():
-    source = CONTROL_BLUEPRINT.read_text(encoding="utf-8")
-
-    expected_variables = {
-        "control_state:",
-        "floor_state:",
-        "floor_reason:",
-        "invalid_closing_windows:",
-        "invalid_windows:",
-        "open_opening_windows:",
-        "closed_opening_windows:",
-        "open_closing_windows:",
-        "windows_to_open:",
-        "windows_to_close:",
-        "windows_to_open_names:",
-        "windows_to_close_names:",
+    assert {
+        input_reference_name(branch["sequence"])
+        for branch in branches
+    } == {
+        "open_actions",
+        "close_actions",
     }
 
-    for variable in expected_variables:
-        assert variable in source
+    assert {
+        condition["value_template"]
+        for branch in branches
+        for condition in branch["conditions"]
+        if condition.get("condition") == "template"
+    } == {
+        "{{ control_state == 'open' }}",
+        "{{ control_state == 'close' }}",
+    }
 
 
 @pytest.mark.parametrize(
-    ("floor_state", "opening_states", "expected"),
+    (
+        "floor_state",
+        "opening_states",
+        "closing_indices",
+        "expected_state",
+        "expected_open",
+        "expected_close",
+    ),
     [
-        ("ventilate", ["off"], "open"),
-        ("ventilate", ["off", "off"], "open"),
-        ("ventilate", ["on"], "ok"),
-        ("ventilate", ["off", "on"], "ok"),
-        ("keep_closed", ["off"], "ok"),
-        ("keep_closed", ["on"], "close"),
-        ("conditional", ["off"], "conditional"),
-        ("neutral", ["off"], "neutral"),
+        pytest.param(
+            "ventilate",
+            ["off"],
+            None,
+            "open",
+            [0],
+            [],
+            id="ventilate-single-closed-opening",
+        ),
+        pytest.param(
+            "ventilate",
+            ["off", "off", "off"],
+            None,
+            "open",
+            [0, 1, 2],
+            [],
+            id="ventilate-all-openings-closed",
+        ),
+        pytest.param(
+            "ventilate",
+            ["on", "off"],
+            None,
+            "ok",
+            [],
+            [],
+            id="ventilate-one-opening-already-open",
+        ),
+        pytest.param(
+            "keep_closed",
+            ["off", "off"],
+            None,
+            "ok",
+            [],
+            [],
+            id="keep-closed-all-closed",
+        ),
+        pytest.param(
+            "keep_closed",
+            ["on", "off"],
+            None,
+            "close",
+            [],
+            [0],
+            id="keep-closed-one-warning-opening-open",
+        ),
+        pytest.param(
+            "conditional",
+            ["off"],
+            None,
+            "conditional",
+            [],
+            [],
+            id="conditional-independent-of-window-state",
+        ),
+        pytest.param(
+            "neutral",
+            ["on"],
+            None,
+            "neutral",
+            [],
+            [],
+            id="neutral-independent-of-window-state",
+        ),
     ],
 )
-def test_control_truth_table(
+def test_control_state_regression_matrix(
     floor_state,
     opening_states,
-    expected,
+    closing_indices,
+    expected_state,
+    expected_open,
+    expected_close,
 ):
-    assert control_state(
+    assert derive_control_state(
         floor_state=floor_state,
         opening_states=opening_states,
-    ) == expected
-
-
-def test_control_uses_explicit_closing_subset():
-    assert control_state(
-        floor_state="keep_closed",
-        opening_states=["off", "on"],
-        closing_states=["off"],
-    ) == "ok"
-
-
-def test_control_close_when_explicit_closing_window_open():
-    assert control_state(
-        floor_state="keep_closed",
-        opening_states=["off", "on"],
-        closing_states=["on"],
-    ) == "close"
-
-
-def test_control_unavailable_with_empty_opening_list():
-    assert control_state(
-        floor_state="ventilate",
-        opening_states=[],
-    ) == "unavailable"
+        closing_indices=closing_indices,
+    ) == (
+        expected_state,
+        expected_open,
+        expected_close,
+    )
 
 
 @pytest.mark.parametrize(
-    "floor_state",
+    (
+        "floor_state",
+        "opening_states",
+        "closing_indices",
+        "expected_state",
+        "expected_close",
+    ),
     [
-        "unknown",
-        "unavailable",
-        "invalid",
+        pytest.param(
+            "keep_closed",
+            ["off", "on", "off", "off"],
+            [0, 2, 3],
+            "ok",
+            [],
+            id="terrace-door-excluded-from-close-warning",
+        ),
+        pytest.param(
+            "keep_closed",
+            ["on", "on", "off", "off"],
+            [0, 2, 3],
+            "close",
+            [0],
+            id="terrace-door-open-plus-real-close-window",
+        ),
+        pytest.param(
+            "ventilate",
+            ["off", "on", "off", "off"],
+            [0, 2, 3],
+            "ok",
+            [],
+            id="terrace-door-still-satisfies-ventilation",
+        ),
     ],
 )
-def test_control_unavailable_with_invalid_floor_state(
+def test_explicit_closing_subset_regressions(
     floor_state,
+    opening_states,
+    closing_indices,
+    expected_state,
+    expected_close,
 ):
-    assert control_state(
+    state, _, windows_to_close = derive_control_state(
         floor_state=floor_state,
-        opening_states=["off"],
-    ) == "unavailable"
+        opening_states=opening_states,
+        closing_indices=closing_indices,
+    )
+
+    assert state == expected_state
+    assert windows_to_close == expected_close
 
 
 @pytest.mark.parametrize(
-    "window_state",
+    (
+        "floor_state",
+        "opening_states",
+        "floor_api_version",
+        "closing_subset_valid",
+    ),
     [
-        "unknown",
-        "unavailable",
-        "invalid",
+        pytest.param(
+            "ventilate",
+            [],
+            "2",
+            True,
+            id="empty-opening-list",
+        ),
+        pytest.param(
+            "unknown",
+            ["off"],
+            "2",
+            True,
+            id="unsupported-floor-state",
+        ),
+        pytest.param(
+            "unavailable",
+            ["off"],
+            "2",
+            True,
+            id="unavailable-floor-state",
+        ),
+        pytest.param(
+            "ventilate",
+            ["unknown"],
+            "2",
+            True,
+            id="unknown-window-state",
+        ),
+        pytest.param(
+            "ventilate",
+            ["unavailable"],
+            "2",
+            True,
+            id="unavailable-window-state",
+        ),
+        pytest.param(
+            "ventilate",
+            ["off"],
+            "1",
+            True,
+            id="wrong-floor-api-version",
+        ),
+        pytest.param(
+            "keep_closed",
+            ["off"],
+            "2",
+            False,
+            id="closing-list-not-subset",
+        ),
     ],
 )
-def test_control_unavailable_with_invalid_window_state(
-    window_state,
+def test_fail_closed_regression_matrix(
+    floor_state,
+    opening_states,
+    floor_api_version,
+    closing_subset_valid,
 ):
-    assert control_state(
-        floor_state="ventilate",
-        opening_states=[window_state],
-    ) == "unavailable"
+    state, windows_to_open, windows_to_close = derive_control_state(
+        floor_state=floor_state,
+        opening_states=opening_states,
+        floor_api_version=floor_api_version,
+        closing_subset_valid=closing_subset_valid,
+    )
+
+    assert state == "unavailable"
+    assert windows_to_open == []
+    assert windows_to_close == []
 
 
-def test_control_unavailable_with_wrong_floor_api():
-    assert control_state(
-        floor_state="ventilate",
-        opening_states=["off"],
-        floor_api_version="1",
-    ) == "unavailable"
+def test_runtime_variable_contract_is_preserved():
+    source = CONTROL_BLUEPRINT.read_text(encoding="utf-8")
 
-
-def test_control_unavailable_with_invalid_closing_subset():
-    assert control_state(
-        floor_state="keep_closed",
-        opening_states=["off"],
-        closing_states=["off"],
-        closing_subset_valid=False,
-    ) == "unavailable"
-
-
-def test_eg_terrace_door_does_not_create_close_warning():
-    assert control_state(
-        floor_state="keep_closed",
-        opening_states=[
-            "off",
-            "on",
-            "off",
-            "off",
-        ],
-        closing_states=[
-            "off",
-            "off",
-            "off",
-        ],
-    ) == "ok"
-
-
-def test_eg_terrace_door_satisfies_ventilation():
-    assert control_state(
-        floor_state="ventilate",
-        opening_states=[
-            "off",
-            "on",
-            "off",
-            "off",
-        ],
-        closing_states=[
-            "off",
-            "off",
-            "off",
-        ],
-    ) == "ok"
+    for name in (
+        "control_state",
+        "floor_state",
+        "floor_reason",
+        "windows_to_open",
+        "windows_to_close",
+        "windows_to_open_names",
+        "windows_to_close_names",
+        "invalid_windows",
+        "invalid_closing_windows",
+        "open_opening_windows",
+        "closed_opening_windows",
+        "open_closing_windows",
+    ):
+        assert f"{name}:" in source

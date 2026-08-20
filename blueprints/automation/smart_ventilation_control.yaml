@@ -1,3 +1,16 @@
+# =============================================================================
+# Smart Ventilation Control
+# Physical opening-state and action layer
+# =============================================================================
+#
+# Data flow:
+#   Floor API v2 + physical binary sensors
+#   -> contract validation
+#   -> derived control state
+#   -> user-provided action hooks
+#
+# This blueprint intentionally creates no helper and no additional sensor.
+# =============================================================================
 blueprint:
   name: Smart Ventilation Control
   description: >
@@ -51,7 +64,7 @@ blueprint:
   domain: automation
   author: Björn Rudner (@rudnerbjoern)
   # yamllint disable-line rule:line-length
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/automation/smart_ventilation_control.yaml
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/automation/smart_ventilation_control.yaml
   homeassistant:
     min_version: "2024.11.0"
 
@@ -207,17 +220,35 @@ blueprint:
           selector:
             action:
 
+# =============================================================================
+# Trigger-time input bindings
+# =============================================================================
+#
+# Only raw blueprint inputs are bound here. The optional closing-list fallback
+# is deliberately calculated in trigger/action scope instead of as a templated
+# list in trigger_variables.
+# =============================================================================
 trigger_variables:
   floor_entity: !input floor_sensor
   opening_entities: !input opening_windows
   configured_closing_entities: !input closing_windows
-  closing_entities: >-
-    {% if configured_closing_entities | count > 0 %}
-      {{ configured_closing_entities }}
-    {% else %}
-      {{ opening_entities }}
-    {% endif %}
 
+# =============================================================================
+# Triggers
+# =============================================================================
+#
+# open / close:
+#   Stable semantic demands using demand_delay_seconds.
+#
+# ok / conditional / neutral / unavailable:
+#   Immediate semantic state transitions.
+#
+# window_change:
+#   Native state trigger for every physical ventilation opening.
+#
+# active_start:
+#   Reconciliation for a demand that existed before the active time window.
+# =============================================================================
 triggers:
   - trigger: template
     id: open
@@ -415,7 +446,28 @@ triggers:
     id: window_change
     entity_id: !input opening_windows
 
+  # Reconcile a demand that was already active before the active time window.
+  - trigger: time
+    id: active_start
+    at: !input active_after
+
+# =============================================================================
+# Action pipeline
+# =============================================================================
+#
+# 1. Apply event-specific settle/stability delays.
+# 2. Re-read current Floor and physical opening states.
+# 3. Validate Floor API and window-list configuration.
+# 4. Derive control_state and affected openings.
+# 5. Resolve friendly names for action templates.
+# 6. Dispatch user-provided action hooks.
+# =============================================================================
 actions:
+  # ---------------------------------------------------------------------------
+  # Physical-window settle delay
+  #
+  # Wait briefly so window_update_actions receives the stable physical state.
+  # ---------------------------------------------------------------------------
   - if:
       - condition: trigger
         id: window_change
@@ -423,7 +475,34 @@ actions:
       - delay:
           seconds: !input window_update_delay_seconds
 
+  # A demand already present at active_after must remain valid for the configured
+  # stability time before a notification/announcement is emitted.
+  # ---------------------------------------------------------------------------
+  # Active-start reconciliation
+  #
+  # Wait the full demand stability time again. The current control state is
+  # calculated only after this delay, so stale demands cannot leak through.
+  # mode: restart cancels this delayed run when a newer relevant event occurs.
+  # ---------------------------------------------------------------------------
+  - if:
+      - condition: trigger
+        id: active_start
+    then:
+      - delay:
+          seconds: !input demand_delay_seconds
+
+  # ---------------------------------------------------------------------------
+  # Normalize closing_windows and snapshot current physical state
+  #
+  # Empty closing_windows means: use all opening_windows.
+  # ---------------------------------------------------------------------------
   - variables:
+      closing_entities: >-
+        {{
+          configured_closing_entities
+          if configured_closing_entities | count > 0
+          else opening_entities
+        }}
       floor_state: "{{ states(floor_entity) }}"
       floor_reason: "{{ state_attr(floor_entity, 'reason') }}"
       invalid_closing_windows: >-
@@ -467,6 +546,17 @@ actions:
         {% endfor %}
         {{ ns.entities }}
 
+  # ---------------------------------------------------------------------------
+  # Derived control-state contract
+  #
+  # ventilate + no opening open      -> open
+  # ventilate + any opening open     -> ok
+  # keep_closed + warning open       -> close
+  # keep_closed + warnings closed    -> ok
+  # conditional                      -> conditional
+  # neutral                          -> neutral
+  # invalid contract                 -> unavailable
+  # ---------------------------------------------------------------------------
   - variables:
       control_state: >-
         {% set valid_floor_states = [
@@ -505,6 +595,11 @@ actions:
           {{ [] }}
         {% endif %}
 
+  # ---------------------------------------------------------------------------
+  # Human-readable affected-opening names
+  #
+  # friendly_name is preferred; entity_id is the safe fallback.
+  # ---------------------------------------------------------------------------
   - variables:
       windows_to_open_names: >-
         {% set ns = namespace(names=[]) %}
@@ -523,6 +618,13 @@ actions:
         {% endfor %}
         {{ ns.names }}
 
+  # ---------------------------------------------------------------------------
+  # Action dispatch
+  #
+  # Regular open/close branches are time-gated.
+  # active_start has already waited and revalidated the current demand.
+  # clear/unavailable/window_update are intentionally not time-gated.
+  # ---------------------------------------------------------------------------
   - choose:
       - conditions:
           - condition: trigger
@@ -538,6 +640,20 @@ actions:
           - condition: time
             after: !input active_after
             before: !input active_before
+        sequence: !input close_actions
+
+      - conditions:
+          - condition: trigger
+            id: active_start
+          - condition: template
+            value_template: "{{ control_state == 'open' }}"
+        sequence: !input open_actions
+
+      - conditions:
+          - condition: trigger
+            id: active_start
+          - condition: template
+            value_template: "{{ control_state == 'close' }}"
         sequence: !input close_actions
 
       - conditions:
