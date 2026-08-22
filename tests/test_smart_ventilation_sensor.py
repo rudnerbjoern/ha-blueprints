@@ -115,10 +115,10 @@ def test_blueprint_contract_and_api_version():
     assert document["sensor"]["attributes"]["api_version"] == "1"
 
 
-def test_source_url_stays_on_dev():
+def test_source_url_stays_on_main():
     metadata = load_home_assistant_yaml(ROOM_BLUEPRINT)["blueprint"]
 
-    assert "/blob/dev/" in metadata["source_url"]
+    assert "/blob/main/" in metadata["source_url"]
 
 
 def test_public_duration_is_minutes_only():
@@ -424,8 +424,10 @@ def test_availability_contains_required_sensor_and_config_checks():
 
 
 def test_keep_closed_confirmation_uses_restored_state_and_pending_timestamp():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
     source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
 
+    assert "this" not in str(document["actions"])
     assert "this.attributes.get('candidate_recommendation', '')" in source
     assert "this.attributes.get('keep_closed_pending_since', none)" in source
     assert "keep_closed_confirmation_minutes_value | float * 60" in source
@@ -436,7 +438,7 @@ def test_pending_close_is_neutral_and_non_close_candidates_publish_immediately()
     source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
 
     assert "candidate_recommendation == 'keep_closed'" in source
-    assert "and keep_closed_confirmation_elapsed | bool" in source
+    assert "and confirmation_elapsed" in source
     assert "elif candidate_recommendation == 'keep_closed'" in source
     assert "{{ candidate_recommendation }}" in source
     assert "keep_closed_pending" in source

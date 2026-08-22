@@ -131,10 +131,10 @@ def test_blueprint_contract():
     assert "sensor" not in document
 
 
-def test_source_url_stays_on_dev():
+def test_source_url_stays_on_main():
     metadata = load_home_assistant_yaml(CONTROL_BLUEPRINT)["blueprint"]
 
-    assert "/blob/dev/" in metadata["source_url"]
+    assert "/blob/main/" in metadata["source_url"]
 
 
 def test_required_and_optional_inputs():

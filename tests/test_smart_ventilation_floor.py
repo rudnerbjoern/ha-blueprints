@@ -55,10 +55,10 @@ def test_blueprint_contract_and_api_versions():
     assert attributes["room_api_version_required"] == "1"
 
 
-def test_source_url_stays_on_dev():
+def test_source_url_stays_on_main():
     metadata = load_home_assistant_yaml(FLOOR_BLUEPRINT)["blueprint"]
 
-    assert "/blob/dev/" in metadata["source_url"]
+    assert "/blob/main/" in metadata["source_url"]
 
 
 def test_room_trigger_reacts_to_attribute_only_changes():

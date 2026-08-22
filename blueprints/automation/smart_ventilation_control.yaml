@@ -64,7 +64,7 @@ blueprint:
   domain: automation
   author: Björn Rudner (@rudnerbjoern)
   # yamllint disable-line rule:line-length
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/automation/smart_ventilation_control.yaml
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/automation/smart_ventilation_control.yaml
   homeassistant:
     min_version: "2024.11.0"
 

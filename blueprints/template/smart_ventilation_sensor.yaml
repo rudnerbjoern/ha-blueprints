@@ -54,7 +54,7 @@ blueprint:
   domain: template
   author: Björn Rudner (@rudnerbjoern)
   # Keep dev while the blueprint is under active development.
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/template/smart_ventilation_sensor.yaml
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/template/smart_ventilation_sensor.yaml
   homeassistant:
     min_version: "2024.11.0"
 
@@ -676,72 +676,7 @@ actions:
         {% endif %}
 
   # ---------------------------------------------------------------------------
-  # Stage 7: Confirm keep-closed candidates without blocking the update action.
-  #
-  # The sensor's restored attributes carry the start of the pending interval.
-  # The one-minute reconciliation trigger advances the timer even if all source
-  # values stay unchanged. A non-closing candidate clears it immediately.
-  # ---------------------------------------------------------------------------
-  - variables:
-      previous_candidate_recommendation: >-
-        {{ this.attributes.get('candidate_recommendation', '') }}
-      previous_keep_closed_pending_since: >-
-        {{ this.attributes.get('keep_closed_pending_since', none) }}
-      keep_closed_pending_since_value: >-
-        {% if candidate_recommendation != 'keep_closed' %}
-          {{ none }}
-        {% elif this.state == 'keep_closed'
-              and previous_keep_closed_pending_since not in [none, '', 'None'] %}
-          {{ previous_keep_closed_pending_since }}
-        {% elif previous_candidate_recommendation == 'keep_closed'
-              and previous_keep_closed_pending_since not in [none, '', 'None'] %}
-          {{ previous_keep_closed_pending_since }}
-        {% else %}
-          {{ now().isoformat() }}
-        {% endif %}
-
-  - variables:
-      keep_closed_confirmation_elapsed: >-
-        {% set pending_timestamp = as_timestamp(
-          keep_closed_pending_since_value,
-          none
-        ) %}
-        {{
-          candidate_recommendation == 'keep_closed'
-          and (
-            this.state == 'keep_closed'
-            or keep_closed_confirmation_minutes_value | float <= 0
-            or (
-              pending_timestamp is not none
-              and as_timestamp(now()) - pending_timestamp
-                >= keep_closed_confirmation_minutes_value | float * 60
-            )
-          )
-        }}
-      keep_closed_pending: >-
-        {{
-          candidate_recommendation == 'keep_closed'
-          and not keep_closed_confirmation_elapsed | bool
-        }}
-      recommendation: >-
-        {% if candidate_recommendation == 'keep_closed'
-              and keep_closed_confirmation_elapsed | bool %}
-          keep_closed
-        {% elif candidate_recommendation == 'keep_closed' %}
-          neutral
-        {% else %}
-          {{ candidate_recommendation }}
-        {% endif %}
-      recommendation_reason: >-
-        {% if candidate_recommendation == 'keep_closed'
-              and not keep_closed_confirmation_elapsed | bool %}
-          keep_closed_pending
-        {% else %}
-          {{ candidate_recommendation_reason }}
-        {% endif %}
-
-  # ---------------------------------------------------------------------------
-  # Stage 8: Estimate purge-ventilation duration.
+  # Stage 7: Estimate purge-ventilation duration.
   # The result is intentionally whole minutes only. This is a recommendation,
   # not a second-accurate air-exchange calculation.
   # ---------------------------------------------------------------------------
@@ -803,14 +738,6 @@ actions:
           ] | min
         }}
 
-  - variables:
-      recommended_duration_minutes_value: >-
-        {% if recommendation in ['ventilate', 'conditional'] %}
-          {{ bounded_duration | int }}
-        {% else %}
-          {{ none }}
-        {% endif %}
-
 # =============================================================================
 # Public Template Sensor API
 # =============================================================================
@@ -825,24 +752,126 @@ sensor:
       required_sensors_valid | bool
       and configuration_valid | bool
     }}
-  state: "{{ recommendation }}"
+  state: >-
+    {% set previous_candidate =
+      this.attributes.get('candidate_recommendation', '') %}
+    {% set previous_pending =
+      this.attributes.get('keep_closed_pending_since', none) %}
+    {% set pending_timestamp = as_timestamp(previous_pending, none) %}
+    {% set confirmation_elapsed =
+      candidate_recommendation == 'keep_closed'
+      and (
+        this.state == 'keep_closed'
+        or keep_closed_confirmation_minutes_value | float <= 0
+        or (
+          previous_candidate == 'keep_closed'
+          and pending_timestamp is not none
+          and as_timestamp(now()) - pending_timestamp
+            >= keep_closed_confirmation_minutes_value | float * 60
+        )
+      )
+    %}
+    {% if candidate_recommendation == 'keep_closed'
+          and confirmation_elapsed %}
+      keep_closed
+    {% elif candidate_recommendation == 'keep_closed' %}
+      neutral
+    {% else %}
+      {{ candidate_recommendation }}
+    {% endif %}
   icon: >-
-    {% if recommendation == 'ventilate' %}
+    {% set previous_candidate =
+      this.attributes.get('candidate_recommendation', '') %}
+    {% set previous_pending =
+      this.attributes.get('keep_closed_pending_since', none) %}
+    {% set pending_timestamp = as_timestamp(previous_pending, none) %}
+    {% set confirmation_elapsed =
+      candidate_recommendation == 'keep_closed'
+      and (
+        this.state == 'keep_closed'
+        or keep_closed_confirmation_minutes_value | float <= 0
+        or (
+          previous_candidate == 'keep_closed'
+          and pending_timestamp is not none
+          and as_timestamp(now()) - pending_timestamp
+            >= keep_closed_confirmation_minutes_value | float * 60
+        )
+      )
+    %}
+    {% if candidate_recommendation == 'ventilate' %}
       mdi:window-open-variant
-    {% elif recommendation == 'conditional' %}
+    {% elif candidate_recommendation == 'conditional' %}
       mdi:weather-windy
-    {% elif recommendation == 'keep_closed' %}
+    {% elif candidate_recommendation == 'keep_closed'
+          and confirmation_elapsed %}
       mdi:window-closed-variant
     {% else %}
       mdi:air-filter
     {% endif %}
   attributes:
     api_version: "1"
-    reason: "{{ recommendation_reason }}"
+    reason: >-
+      {% set previous_candidate =
+        this.attributes.get('candidate_recommendation', '') %}
+      {% set previous_pending =
+        this.attributes.get('keep_closed_pending_since', none) %}
+      {% set pending_timestamp = as_timestamp(previous_pending, none) %}
+      {% set confirmation_elapsed =
+        candidate_recommendation == 'keep_closed'
+        and (
+          this.state == 'keep_closed'
+          or keep_closed_confirmation_minutes_value | float <= 0
+          or (
+            previous_candidate == 'keep_closed'
+            and pending_timestamp is not none
+            and as_timestamp(now()) - pending_timestamp
+              >= keep_closed_confirmation_minutes_value | float * 60
+          )
+        )
+      %}
+      {% if candidate_recommendation == 'keep_closed'
+            and not confirmation_elapsed %}
+        keep_closed_pending
+      {% else %}
+        {{ candidate_recommendation_reason }}
+      {% endif %}
     candidate_recommendation: "{{ candidate_recommendation }}"
     candidate_reason: "{{ candidate_recommendation_reason }}"
-    keep_closed_pending: "{{ keep_closed_pending | bool }}"
-    keep_closed_pending_since: "{{ keep_closed_pending_since_value }}"
+    keep_closed_pending: >-
+      {% set previous_candidate =
+        this.attributes.get('candidate_recommendation', '') %}
+      {% set previous_pending =
+        this.attributes.get('keep_closed_pending_since', none) %}
+      {% set pending_timestamp = as_timestamp(previous_pending, none) %}
+      {{
+        candidate_recommendation == 'keep_closed'
+        and not (
+          this.state == 'keep_closed'
+          or keep_closed_confirmation_minutes_value | float <= 0
+          or (
+            previous_candidate == 'keep_closed'
+            and pending_timestamp is not none
+            and as_timestamp(now()) - pending_timestamp
+              >= keep_closed_confirmation_minutes_value | float * 60
+          )
+        )
+      }}
+    keep_closed_pending_since: >-
+      {% set previous_candidate =
+        this.attributes.get('candidate_recommendation', '') %}
+      {% set previous_pending =
+        this.attributes.get('keep_closed_pending_since', none) %}
+      {% if candidate_recommendation != 'keep_closed' %}
+        {{ none }}
+      {% elif previous_candidate == 'keep_closed'
+            and previous_pending not in [none, '', 'None'] %}
+        {{ previous_pending }}
+      {% elif this.state == 'keep_closed'
+            and previous_pending not in [none, '', 'None'] %}
+        {{ previous_pending }}
+      {% else %}
+        {{ now().isoformat() }}
+      {% endif %}
     keep_closed_confirmation_minutes: >-
       {{ keep_closed_confirmation_minutes_value | int }}
     maximum_acceptable_negative_drying_potential: >-
@@ -866,4 +895,9 @@ sensor:
         vapor_concentration
       {% endif %}
     thermal_condition: "{{ thermal_condition_value }}"
-    recommended_duration_minutes: "{{ recommended_duration_minutes_value }}"
+    recommended_duration_minutes: >-
+      {% if candidate_recommendation in ['ventilate', 'conditional'] %}
+        {{ bounded_duration | int }}
+      {% else %}
+        {{ none }}
+      {% endif %}
