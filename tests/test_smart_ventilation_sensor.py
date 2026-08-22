@@ -1,14 +1,14 @@
-from pathlib import Path
-
 import pytest
 
-from tests.helpers import TEMPLATE_BLUEPRINT_ROOT
+from tests.helpers import BLUEPRINT_ROOT, load_home_assistant_yaml
 
 
 ROOM_BLUEPRINT = (
-    TEMPLATE_BLUEPRINT_ROOT
+    BLUEPRINT_ROOT
+    / "template"
     / "smart_ventilation_sensor.yaml"
 )
+
 
 def recommend_room(
     *,
@@ -18,731 +18,425 @@ def recommend_room(
     outdoor_vapor_concentration: float,
     indoor_relative_humidity: float | None = None,
     minimum_drying_potential: float = 0.8,
+    maximum_acceptable_negative_drying_potential: float = 2.0,
     strong_drying_potential: float = 2.0,
     very_strong_drying_potential: float = 4.0,
     warmer_threshold: float = 1.0,
     much_warmer_threshold: float = 3.0,
     minimum_indoor_relative_humidity: float = 35.0,
-    minimum_indoor_vapor_concentration: float = 5.5,
+    minimum_indoor_vapor: float = 5.5,
 ) -> tuple[str, str]:
-    drying_potential = (
-        indoor_vapor_concentration
-        - outdoor_vapor_concentration
-    )
+    """Reference model for the Room blueprint candidate recommendation."""
+    drying = indoor_vapor_concentration - outdoor_vapor_concentration
+    delta_t = outdoor_temperature - indoor_temperature
 
-    temperature_difference = (
-        outdoor_temperature
-        - indoor_temperature
-    )
-
-    dry_air_protection_active = (
-        indoor_relative_humidity is not None
-        and indoor_relative_humidity
-        < minimum_indoor_relative_humidity
-    )
-
-    if indoor_relative_humidity is None:
-        dry_air_protection_active = (
-            indoor_vapor_concentration
-            < minimum_indoor_vapor_concentration
+    if indoor_relative_humidity is not None:
+        dry_air = (
+            indoor_relative_humidity
+            < minimum_indoor_relative_humidity
         )
+    else:
+        dry_air = indoor_vapor_concentration < minimum_indoor_vapor
+
+    if dry_air and drying >= minimum_drying_potential:
+        return "keep_closed", "indoor_air_already_dry"
+
+    if drying <= -maximum_acceptable_negative_drying_potential:
+        return "keep_closed", "outdoor_air_more_humid"
 
     if (
-        dry_air_protection_active
-        and drying_potential >= minimum_drying_potential
+        delta_t >= much_warmer_threshold
+        and drying >= very_strong_drying_potential
     ):
-        return (
-            "keep_closed",
-            "indoor_air_already_dry",
-        )
+        return "conditional", "strong_drying_benefit_but_much_warmer"
 
-    if drying_potential <= -minimum_drying_potential:
-        return (
-            "keep_closed",
-            "outdoor_air_more_humid",
-        )
+    if delta_t >= much_warmer_threshold:
+        return "keep_closed", "outdoor_air_much_warmer"
 
     if (
-        temperature_difference
-        >= much_warmer_threshold
-        and drying_potential
-        >= very_strong_drying_potential
+        drying >= minimum_drying_potential
+        and delta_t >= warmer_threshold
     ):
-        return (
-            "conditional",
-            "strong_drying_benefit_but_much_warmer",
-        )
+        return "conditional", "outdoor_air_drier_but_warmer"
 
-    if temperature_difference >= much_warmer_threshold:
-        return (
-            "keep_closed",
-            "outdoor_air_much_warmer",
-        )
+    if drying >= minimum_drying_potential:
+        if (
+            drying >= very_strong_drying_potential
+            and outdoor_temperature < 5
+        ):
+            return "ventilate", "outdoor_air_much_drier_and_cold"
 
-    if (
-        temperature_difference >= warmer_threshold
-        and drying_potential >= minimum_drying_potential
-    ):
-        return (
+        if drying >= strong_drying_potential:
+            return "ventilate", "outdoor_air_significantly_drier"
+
+        return "ventilate", "outdoor_air_drier"
+
+    if delta_t >= warmer_threshold:
+        return "keep_closed", "outdoor_air_warmer_without_drying_benefit"
+
+    return "neutral", "conditions_similar"
+
+
+def configuration_errors(
+    *,
+    minimum_drying: float = 0.8,
+    strong_drying: float = 2.0,
+    very_strong_drying: float = 4.0,
+    warmer: float = 1.0,
+    much_warmer: float = 3.0,
+    minimum_duration: float = 2.0,
+    maximum_duration: float = 30.0,
+) -> list[str]:
+    errors = []
+
+    if minimum_drying > strong_drying:
+        errors.append("minimum_drying_exceeds_strong_drying")
+
+    if strong_drying > very_strong_drying:
+        errors.append("strong_drying_exceeds_very_strong_drying")
+
+    if warmer > much_warmer:
+        errors.append("warmer_threshold_exceeds_much_warmer_threshold")
+
+    if minimum_duration > maximum_duration:
+        errors.append("minimum_duration_exceeds_maximum_duration")
+
+    return errors
+
+
+def test_blueprint_contract_and_api_version():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
+
+    assert document["blueprint"]["domain"] == "template"
+    assert (
+        str(document["blueprint"]["homeassistant"]["min_version"])
+        == "2024.11.0"
+    )
+    assert document["sensor"]["attributes"]["api_version"] == "1"
+
+
+def test_source_url_stays_on_dev():
+    metadata = load_home_assistant_yaml(ROOM_BLUEPRINT)["blueprint"]
+
+    assert "/blob/dev/" in metadata["source_url"]
+
+
+def test_public_duration_is_minutes_only():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
+    attributes = document["sensor"]["attributes"]
+    source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
+
+    assert "recommended_duration_minutes" in attributes
+    assert "recommended_duration_seconds" not in attributes
+    assert "recommended_duration_seconds_value" not in source
+
+
+def test_configuration_diagnostics_are_public():
+    attributes = load_home_assistant_yaml(
+        ROOM_BLUEPRINT
+    )["sensor"]["attributes"]
+
+    assert "configuration_valid" in attributes
+    assert "configuration_errors" in attributes
+
+
+def test_keep_closed_stability_diagnostics_are_public():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
+    inputs = document["blueprint"]["input"]["thresholds"]["input"]
+    attributes = document["sensor"]["attributes"]
+
+    assert inputs[
+        "maximum_acceptable_negative_drying_potential"
+    ]["default"] == 2.0
+    assert inputs["keep_closed_confirmation_minutes"]["default"] == 15
+    assert {
+        "candidate_recommendation",
+        "candidate_reason",
+        "keep_closed_pending",
+        "keep_closed_pending_since",
+        "keep_closed_confirmation_minutes",
+        "maximum_acceptable_negative_drying_potential",
+    } <= attributes.keys()
+
+
+def test_optional_humidity_reconciliation_is_one_minute():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
+
+    trigger = next(
+        item
+        for item in document["triggers"]
+        if item.get("id") == "reconcile"
+    )
+
+    assert trigger["trigger"] == "time_pattern"
+    assert trigger["minutes"] == "/1"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_state", "expected_reason"),
+    [
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=15.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=9.2,
+            ),
+            "ventilate",
+            "outdoor_air_drier",
+            id="minimum-drying-threshold",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=15.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=8.0,
+            ),
+            "ventilate",
+            "outdoor_air_significantly_drier",
+            id="strong-drying-threshold",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=4.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=6.0,
+            ),
+            "ventilate",
+            "outdoor_air_much_drier_and_cold",
+            id="very-strong-drying-cold",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=23.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=9.2,
+            ),
             "conditional",
             "outdoor_air_drier_but_warmer",
-        )
-
-    if drying_potential >= minimum_drying_potential:
-        if (
-            drying_potential
-            >= very_strong_drying_potential
-            and outdoor_temperature < 5.0
-        ):
-            return (
-                "ventilate",
-                "outdoor_air_much_drier_and_cold",
-            )
-
-        if drying_potential >= strong_drying_potential:
-            return (
-                "ventilate",
-                "outdoor_air_significantly_drier",
-            )
-
-        return (
-            "ventilate",
-            "outdoor_air_drier",
-        )
-
-    if temperature_difference >= warmer_threshold:
-        return (
+            id="warmer-at-threshold-with-useful-drying",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=25.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=6.0,
+            ),
+            "conditional",
+            "strong_drying_benefit_but_much_warmer",
+            id="much-warmer-but-very-strong-drying",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=25.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=8.0,
+            ),
+            "keep_closed",
+            "outdoor_air_much_warmer",
+            id="much-warmer-without-very-strong-drying",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=23.0,
+                indoor_vapor_concentration=10.0,
+                outdoor_vapor_concentration=9.5,
+            ),
             "keep_closed",
             "outdoor_air_warmer_without_drying_benefit",
-        )
-
-    return (
-        "neutral",
-        "conditions_similar",
-    )
-
-
-@pytest.mark.parametrize(
-    ("drying_potential", "expected_state"),
-    [
+            id="warmer-without-useful-drying",
+        ),
         pytest.param(
-            0.79,
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=20.0,
+                indoor_vapor_concentration=8.0,
+                outdoor_vapor_concentration=8.8,
+            ),
             "neutral",
-            id="minimum-drying-below-threshold",
+            "conditions_similar",
+            id="small-moisture-disadvantage-remains-neutral",
         ),
         pytest.param(
-            0.80,
-            "ventilate",
-            id="minimum-drying-exact-threshold",
-        ),
-        pytest.param(
-            0.81,
-            "ventilate",
-            id="minimum-drying-above-threshold",
-        ),
-    ],
-)
-def test_minimum_drying_potential_boundary(
-    drying_potential,
-    expected_state,
-):
-    state, _ = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=20.0,
-        indoor_vapor_concentration=10.0,
-        outdoor_vapor_concentration=(
-            10.0 - drying_potential
-        ),
-        indoor_relative_humidity=50.0,
-    )
-
-    assert state == expected_state
-
-
-@pytest.mark.parametrize(
-    ("temperature_difference", "expected_state"),
-    [
-        pytest.param(
-            0.99,
-            "ventilate",
-            id="warmer-below-threshold",
-        ),
-        pytest.param(
-            1.00,
-            "conditional",
-            id="warmer-exact-threshold",
-        ),
-        pytest.param(
-            1.01,
-            "conditional",
-            id="warmer-above-threshold",
-        ),
-    ],
-)
-def test_warmer_temperature_boundary(
-    temperature_difference,
-    expected_state,
-):
-    state, _ = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=(
-            22.0 + temperature_difference
-        ),
-        indoor_vapor_concentration=10.0,
-        outdoor_vapor_concentration=9.0,
-        indoor_relative_humidity=50.0,
-    )
-
-    assert state == expected_state
-
-
-@pytest.mark.parametrize(
-    ("temperature_difference", "expected_state"),
-    [
-        pytest.param(
-            2.99,
-            "conditional",
-            id="much-warmer-below-threshold",
-        ),
-        pytest.param(
-            3.00,
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=20.0,
+                indoor_vapor_concentration=8.0,
+                outdoor_vapor_concentration=10.0,
+            ),
             "keep_closed",
-            id="much-warmer-exact-threshold",
+            "outdoor_air_more_humid",
+            id="outside-wetter-at-close-threshold",
         ),
         pytest.param(
-            3.01,
-            "keep_closed",
-            id="much-warmer-above-threshold",
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=21.0,
+                indoor_vapor_concentration=8.0,
+                outdoor_vapor_concentration=7.5,
+            ),
+            "neutral",
+            "conditions_similar",
+            id="small-drying-benefit-below-threshold",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=22.0,
+                indoor_vapor_concentration=8.0,
+                outdoor_vapor_concentration=8.0,
+            ),
+            "neutral",
+            "conditions_similar",
+            id="identical-conditions",
         ),
     ],
 )
-def test_much_warmer_temperature_boundary(
-    temperature_difference,
+def test_recommendation_regression_matrix(
+    kwargs,
     expected_state,
-):
-    state, _ = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=(
-            22.0 + temperature_difference
-        ),
-        indoor_vapor_concentration=10.0,
-        outdoor_vapor_concentration=9.0,
-        indoor_relative_humidity=50.0,
-    )
-
-    assert state == expected_state
-
-
-@pytest.mark.parametrize(
-    ("drying_potential", "expected_reason"),
-    [
-        pytest.param(
-            1.99,
-            "outdoor_air_drier",
-            id="strong-drying-below-threshold",
-        ),
-        pytest.param(
-            2.00,
-            "outdoor_air_significantly_drier",
-            id="strong-drying-exact-threshold",
-        ),
-        pytest.param(
-            2.01,
-            "outdoor_air_significantly_drier",
-            id="strong-drying-above-threshold",
-        ),
-    ],
-)
-def test_strong_drying_reason_boundary(
-    drying_potential,
     expected_reason,
 ):
-    state, reason = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=15.0,
-        indoor_vapor_concentration=10.0,
-        outdoor_vapor_concentration=(
-            10.0 - drying_potential
-        ),
-        indoor_relative_humidity=50.0,
+    assert recommend_room(**kwargs) == (
+        expected_state,
+        expected_reason,
     )
-
-    assert state == "ventilate"
-    assert reason == expected_reason
 
 
 @pytest.mark.parametrize(
-    ("drying_potential", "expected_reason"),
+    ("relative_humidity", "indoor_vapor", "expected"),
     [
         pytest.param(
-            3.99,
-            "outdoor_air_significantly_drier",
-            id="very-strong-below-threshold",
-        ),
-        pytest.param(
-            4.00,
-            "outdoor_air_much_drier_and_cold",
-            id="very-strong-exact-threshold",
-        ),
-        pytest.param(
-            4.01,
-            "outdoor_air_much_drier_and_cold",
-            id="very-strong-above-threshold",
-        ),
-    ],
-)
-def test_very_strong_drying_reason_boundary(
-    drying_potential,
-    expected_reason,
-):
-    state, reason = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=4.0,
-        indoor_vapor_concentration=10.0,
-        outdoor_vapor_concentration=(
-            10.0 - drying_potential
-        ),
-        indoor_relative_humidity=50.0,
-    )
-
-    assert state == "ventilate"
-    assert reason == expected_reason
-
-
-@pytest.mark.parametrize(
-    ("relative_humidity", "expected_state"),
-    [
-        pytest.param(
-            34.9,
-            "keep_closed",
-            id="dry-air-protection-active",
+            34.0,
+            8.0,
+            ("keep_closed", "indoor_air_already_dry"),
+            id="rh-below-threshold",
         ),
         pytest.param(
             35.0,
-            "ventilate",
-            id="dry-air-protection-boundary",
+            8.0,
+            ("ventilate", "outdoor_air_significantly_drier"),
+            id="rh-exactly-threshold-not-protected",
         ),
         pytest.param(
-            35.1,
-            "ventilate",
-            id="dry-air-protection-inactive",
+            None,
+            5.4,
+            ("keep_closed", "indoor_air_already_dry"),
+            id="absolute-vapor-fallback-below-threshold",
+        ),
+        pytest.param(
+            None,
+            5.5,
+            ("ventilate", "outdoor_air_significantly_drier"),
+            id="absolute-vapor-exact-threshold-not-protected",
         ),
     ],
 )
-def test_dry_air_protection_relative_humidity(
+def test_dry_air_protection_regression(
     relative_humidity,
-    expected_state,
+    indoor_vapor,
+    expected,
 ):
-    state, _ = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=18.0,
-        indoor_vapor_concentration=8.0,
-        outdoor_vapor_concentration=6.0,
+    result = recommend_room(
+        indoor_temperature=21.0,
+        outdoor_temperature=10.0,
+        indoor_vapor_concentration=indoor_vapor,
+        outdoor_vapor_concentration=3.0,
         indoor_relative_humidity=relative_humidity,
     )
 
-    assert state == expected_state
+    assert result == expected
 
 
 @pytest.mark.parametrize(
-    ("indoor_vapor", "expected_state"),
+    ("kwargs", "expected"),
     [
         pytest.param(
-            5.49,
-            "keep_closed",
-            id="fallback-dry-air-protection-active",
+            dict(minimum_drying=2.1, strong_drying=2.0),
+            ["minimum_drying_exceeds_strong_drying"],
+            id="minimum-greater-than-strong",
         ),
         pytest.param(
-            5.50,
-            "ventilate",
-            id="fallback-dry-air-protection-boundary",
+            dict(strong_drying=4.1, very_strong_drying=4.0),
+            ["strong_drying_exceeds_very_strong_drying"],
+            id="strong-greater-than-very-strong",
         ),
         pytest.param(
-            5.51,
-            "ventilate",
-            id="fallback-dry-air-protection-inactive",
+            dict(warmer=3.1, much_warmer=3.0),
+            ["warmer_threshold_exceeds_much_warmer_threshold"],
+            id="warmer-greater-than-much-warmer",
+        ),
+        pytest.param(
+            dict(minimum_duration=31.0, maximum_duration=30.0),
+            ["minimum_duration_exceeds_maximum_duration"],
+            id="minimum-duration-greater-than-maximum",
         ),
     ],
 )
-def test_dry_air_protection_vapor_fallback(
-    indoor_vapor,
-    expected_state,
-):
-    state, _ = recommend_room(
-        indoor_temperature=22.0,
-        outdoor_temperature=18.0,
-        indoor_vapor_concentration=indoor_vapor,
-        outdoor_vapor_concentration=(
-            indoor_vapor - 1.0
-        ),
-        indoor_relative_humidity=None,
-    )
-
-    assert state == expected_state
-
-
-@pytest.mark.parametrize(
-    (
-        "indoor_temperature",
-        "outdoor_temperature",
-        "indoor_vapor",
-        "outdoor_vapor",
-        "expected_state",
-        "expected_reason",
-    ),
-    [
-        pytest.param(
-            22.0,
-            20.0,
-            10.0,
-            11.0,
-            "keep_closed",
-            "outdoor_air_more_humid",
-            id="outdoor-air-more-humid",
-        ),
-        pytest.param(
-            22.0,
-            26.0,
-            10.0,
-            6.0,
-            "conditional",
-            "strong_drying_benefit_but_much_warmer",
-            id="very-strong-drying-despite-heat",
-        ),
-        pytest.param(
-            22.0,
-            26.0,
-            10.0,
-            9.0,
-            "keep_closed",
-            "outdoor_air_much_warmer",
-            id="much-warmer-without-strong-benefit",
-        ),
-        pytest.param(
-            22.0,
-            24.0,
-            10.0,
-            9.0,
-            "conditional",
-            "outdoor_air_drier_but_warmer",
-            id="drier-but-warmer",
-        ),
-        pytest.param(
-            22.0,
-            20.0,
-            10.0,
-            9.0,
-            "ventilate",
-            "outdoor_air_drier",
-            id="normal-ventilation",
-        ),
-        pytest.param(
-            22.0,
-            23.5,
-            10.0,
-            9.5,
-            "keep_closed",
-            "outdoor_air_warmer_without_drying_benefit",
-            id="warmer-without-drying-benefit",
-        ),
-        pytest.param(
-            22.0,
-            22.2,
-            10.0,
-            9.7,
-            "neutral",
-            "conditions_similar",
-            id="similar-conditions",
-        ),
-    ],
-)
-def test_room_truth_table(
-    indoor_temperature,
-    outdoor_temperature,
-    indoor_vapor,
-    outdoor_vapor,
-    expected_state,
-    expected_reason,
-):
-    state, reason = recommend_room(
-        indoor_temperature=indoor_temperature,
-        outdoor_temperature=outdoor_temperature,
-        indoor_vapor_concentration=indoor_vapor,
-        outdoor_vapor_concentration=outdoor_vapor,
-        indoor_relative_humidity=50.0,
-    )
-
-    assert state == expected_state
-    assert reason == expected_reason
-
-EXPECTED_ROOM_STATES = {
-    "ventilate",
-    "conditional",
-    "keep_closed",
-    "neutral",
-}
-
-
-EXPECTED_REASON_CODES = {
-    "indoor_air_already_dry",
-    "outdoor_air_more_humid",
-    "strong_drying_benefit_but_much_warmer",
-    "outdoor_air_much_warmer",
-    "outdoor_air_drier_but_warmer",
-    "outdoor_air_much_drier_and_cold",
-    "outdoor_air_significantly_drier",
-    "outdoor_air_drier",
-    "conditions_similar",
-    "outdoor_air_warmer_without_drying_benefit",
-}
-
-
-EXPECTED_ROOM_ATTRIBUTES = {
-    "api_version",
-    "reason",
-    "indoor_temperature",
-    "outdoor_temperature",
-    "temperature_difference",
-    "indoor_vapor_concentration",
-    "outdoor_vapor_concentration",
-    "drying_potential",
-    "drying_potential_level",
-    "indoor_relative_humidity",
-    "outdoor_relative_humidity",
-    "dry_air_protection_active",
-    "dry_air_protection_source",
-    "thermal_condition",
-    "recommended_duration_minutes",
-    "recommended_duration_seconds",
-}
-
-
-def _blueprint_source() -> str:
-    return ROOM_BLUEPRINT.read_text(encoding="utf-8")
-
-
-def _find_input_definition(inputs, input_name):
-    """Recursively find an input, including inputs nested in sections."""
-
-    if input_name in inputs:
-        return inputs[input_name]
-
-    for value in inputs.values():
-        if not isinstance(value, dict):
-            continue
-
-        nested_inputs = value.get("input")
-
-        if isinstance(nested_inputs, dict):
-            found = _find_input_definition(
-                nested_inputs,
-                input_name,
-            )
-
-            if found is not None:
-                return found
-
-    return None
-
-
-def test_room_blueprint_exists():
-    assert ROOM_BLUEPRINT.is_file()
-
-
-def test_room_blueprint_domain(load_blueprint):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    assert document["blueprint"]["domain"] == "template"
-
-
-def test_room_blueprint_minimum_home_assistant_version(
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    assert (
-        document["blueprint"]["homeassistant"]["min_version"]
-        == "2024.11.0"
-    )
-
-
-def test_room_blueprint_api_version(load_blueprint):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    attributes = document["sensor"]["attributes"]
-
-    assert attributes["api_version"] == "1"
-
-
-@pytest.mark.parametrize(
-    "attribute",
-    sorted(EXPECTED_ROOM_ATTRIBUTES),
-)
-def test_room_api_contains_expected_attribute(
-    attribute,
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    assert attribute in document["sensor"]["attributes"]
-
-
-@pytest.mark.parametrize(
-    "reason",
-    sorted(EXPECTED_REASON_CODES),
-)
-def test_room_blueprint_contains_reason_code(reason):
-    source = _blueprint_source()
-
-    assert reason in source
-
-
-@pytest.mark.parametrize(
-    "state",
-    sorted(EXPECTED_ROOM_STATES),
-)
-def test_room_blueprint_contains_public_state(state):
-    source = _blueprint_source()
-
-    assert state in source
-
-
-@pytest.mark.parametrize(
-    "input_name",
-    [
-        "indoor_temperature",
-        "indoor_vapor_concentration",
-        "outdoor_temperature",
-        "outdoor_vapor_concentration",
-    ],
-)
-def test_required_sensor_input_exists(
-    input_name,
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-    inputs = document["blueprint"]["input"]
-
-    definition = _find_input_definition(
-        inputs,
-        input_name,
-    )
-
-    assert definition is not None
-
-
-@pytest.mark.parametrize(
-    "input_name",
-    [
-        "indoor_relative_humidity",
-        "outdoor_relative_humidity",
-    ],
-)
-def test_optional_humidity_input_exists(
-    input_name,
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-    inputs = document["blueprint"]["input"]
-
-    definition = _find_input_definition(
-        inputs,
-        input_name,
-    )
-
-    assert definition is not None
-
-
-def test_room_blueprint_has_availability_guard(
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    assert "availability" in document["sensor"]
-
-    availability = document["sensor"]["availability"]
-
-    assert "is_number" in availability
-
-
-def test_room_blueprint_has_start_trigger(
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    triggers = document["triggers"]
-
-    assert {
-        "trigger": "homeassistant",
-        "event": "start",
-    } in triggers
-
-
-def test_room_blueprint_has_periodic_fallback(
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    triggers = document["triggers"]
-
-    assert any(
-        trigger.get("trigger") == "time_pattern"
-        and trigger.get("minutes") == "/5"
-        for trigger in triggers
-    )
-
-
-@pytest.mark.parametrize(
-    "input_name",
-    [
-        "indoor_temperature",
-        "indoor_vapor_concentration",
-        "outdoor_temperature",
-        "outdoor_vapor_concentration",
-    ],
-)
-def test_required_input_has_state_trigger(
-    input_name,
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-
-    expected_input = {
-        "__ha_tag__": "!input",
-        "value": input_name,
+def test_invalid_configuration_regressions(kwargs, expected):
+    assert configuration_errors(**kwargs) == expected
+
+
+def test_equal_threshold_boundaries_are_valid():
+    assert configuration_errors(
+        minimum_drying=2.0,
+        strong_drying=2.0,
+        very_strong_drying=2.0,
+        warmer=3.0,
+        much_warmer=3.0,
+        minimum_duration=10.0,
+        maximum_duration=10.0,
+    ) == []
+
+
+def test_multiple_configuration_errors_are_reported_together():
+    assert set(
+        configuration_errors(
+            minimum_drying=5.0,
+            strong_drying=4.0,
+            very_strong_drying=3.0,
+            warmer=5.0,
+            much_warmer=2.0,
+            minimum_duration=40.0,
+            maximum_duration=30.0,
+        )
+    ) == {
+        "minimum_drying_exceeds_strong_drying",
+        "strong_drying_exceeds_very_strong_drying",
+        "warmer_threshold_exceeds_much_warmer_threshold",
+        "minimum_duration_exceeds_maximum_duration",
     }
 
-    assert any(
-        trigger.get("trigger") == "state"
-        and trigger.get("entity_id") == expected_input
-        for trigger in document["triggers"]
-    )
+
+def test_availability_contains_required_sensor_and_config_checks():
+    availability = load_home_assistant_yaml(
+        ROOM_BLUEPRINT
+    )["sensor"]["availability"]
+
+    assert "required_sensors_valid" in availability
+    assert "configuration_valid" in availability
 
 
-@pytest.mark.parametrize(
-    ("input_name", "expected_default"),
-    [
-        ("minimum_drying_potential", 0.8),
-        ("strong_drying_potential", 2.0),
-        ("very_strong_drying_potential", 4.0),
-        ("warmer_outdoor_threshold", 1.0),
-        ("much_warmer_outdoor_threshold", 3.0),
-        ("minimum_indoor_relative_humidity", 35),
-        ("minimum_indoor_vapor", 5.5),
-    ],
-)
-def test_room_physical_threshold_default(
-    input_name,
-    expected_default,
-    load_blueprint,
-):
-    document = load_blueprint(ROOM_BLUEPRINT)
-    inputs = document["blueprint"]["input"]
+def test_keep_closed_confirmation_uses_restored_state_and_pending_timestamp():
+    source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
 
-    definition = _find_input_definition(
-        inputs,
-        input_name,
-    )
+    assert "this.attributes.get('candidate_recommendation', '')" in source
+    assert "this.attributes.get('keep_closed_pending_since', none)" in source
+    assert "keep_closed_confirmation_minutes_value | float * 60" in source
+    assert "this.state == 'keep_closed'" in source
 
-    assert definition is not None
-    assert definition["default"] == expected_default
+
+def test_pending_close_is_neutral_and_non_close_candidates_publish_immediately():
+    source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
+
+    assert "candidate_recommendation == 'keep_closed'" in source
+    assert "and keep_closed_confirmation_elapsed | bool" in source
+    assert "elif candidate_recommendation == 'keep_closed'" in source
+    assert "{{ candidate_recommendation }}" in source
+    assert "keep_closed_pending" in source

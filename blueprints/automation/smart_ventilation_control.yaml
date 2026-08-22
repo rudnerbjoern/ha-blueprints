@@ -1,3 +1,16 @@
+# =============================================================================
+# Smart Ventilation Control
+# Physical opening-state and action layer
+# =============================================================================
+#
+# Data flow:
+#   Floor API v2 + physical binary sensors
+#   -> contract validation
+#   -> derived control state
+#   -> user-provided action hooks
+#
+# This blueprint intentionally creates no helper and no additional sensor.
+# =============================================================================
 blueprint:
   name: Smart Ventilation Control
   description: >
@@ -37,16 +50,24 @@ blueprint:
     subset of opening_windows. This allows selected openings to count for
     ventilation without creating close warnings.
 
+    Open and close demand actions are delayed until the demand has remained
+    continuously active for the configured stability time and are only executed
+    inside the configured active time window. Clear, unavailable, and window
+    update actions are processed independently of the active time window.
+
+    Window changes use a separate action hook. This allows a persistent
+    notification to be updated live without repeating push notifications or
+    voice announcements.
+
     The blueprint deliberately does not create an additional helper or template
-    entity. Derived-state template triggers fire only when their boolean result
-    changes from false to true, so open/close actions are not repeated for
-    unrelated updates while the effective control state remains unchanged.
+    entity.
   domain: automation
   author: Björn Rudner (@rudnerbjoern)
   # yamllint disable-line rule:line-length
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/automation/smart_ventilation_control.yaml
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/automation/smart_ventilation_control.yaml
   homeassistant:
     min_version: "2024.11.0"
+
   input:
     recommendation:
       name: Floor recommendation
@@ -94,22 +115,79 @@ blueprint:
               multiple: true
               reorder: false
 
+    timing:
+      name: Timing
+      icon: mdi:timer-outline
+      collapsed: true
+      input:
+        demand_delay_seconds:
+          name: Open/close stability time
+          description: >
+            An open or close demand must remain continuously active for this
+            many seconds before the corresponding action can run.
+          default: 120
+          selector:
+            number:
+              min: 0
+              max: 1800
+              step: 1
+              unit_of_measurement: seconds
+              mode: box
+
+        window_update_delay_seconds:
+          name: Window update settle time
+          description: >
+            Delay after a window or door state change before evaluating the
+            current control state for window update actions.
+          default: 1
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 1
+              unit_of_measurement: seconds
+              mode: box
+
+        active_after:
+          name: Open/close actions active after
+          description: >
+            Earliest time at which open and close demand actions may run.
+          default: "07:00:00"
+          selector:
+            time:
+
+        active_before:
+          name: Open/close actions active before
+          description: >
+            Latest time before which open and close demand actions may run.
+          default: "23:00:00"
+          selector:
+            time:
+
     actions_section:
       name: Actions
       description: >
-        Actions executed when the derived control state changes. Variables such
-        as control_state, windows_to_open, windows_to_close, floor_state,
-        floor_reason, and invalid_windows are available to these actions.
+        Actions executed for effective control-state events. The variables
+        control_state, floor_state, floor_reason, windows_to_open,
+        windows_to_close, windows_to_open_names, windows_to_close_names,
+        invalid_windows, invalid_closing_windows, open_opening_windows,
+        closed_opening_windows, and open_closing_windows are available.
       icon: mdi:play-circle-outline
       input:
         open_actions:
-          name: Open actions
+          name: Open demand actions
+          description: >
+            Runs when an open demand has remained active for the configured
+            stability time and the current time is inside the active window.
           default: []
           selector:
             action:
 
         close_actions:
-          name: Close actions
+          name: Close demand actions
+          description: >
+            Runs when a close demand has remained active for the configured
+            stability time and the current time is inside the active window.
           default: []
           selector:
             action:
@@ -117,28 +195,60 @@ blueprint:
         clear_actions:
           name: Clear actions
           description: >
-            Runs when the derived state becomes ok, conditional, or neutral.
+            Runs immediately when the derived state becomes ok, conditional,
+            or neutral.
           default: []
           selector:
             action:
 
         unavailable_actions:
           name: Unavailable actions
+          description: >
+            Runs immediately when the floor recommendation or configured
+            windows become invalid or unavailable.
           default: []
           selector:
             action:
 
+        window_update_actions:
+          name: Window update actions
+          description: >
+            Runs after every configured window or door state change, after the
+            settle delay. Use this to update a persistent notification without
+            repeating push or voice notifications.
+          default: []
+          selector:
+            action:
+
+# =============================================================================
+# Trigger-time input bindings
+# =============================================================================
+#
+# Only raw blueprint inputs are bound here. The optional closing-list fallback
+# is deliberately calculated in trigger/action scope instead of as a templated
+# list in trigger_variables.
+# =============================================================================
 trigger_variables:
   floor_entity: !input floor_sensor
   opening_entities: !input opening_windows
   configured_closing_entities: !input closing_windows
-  closing_entities: >-
-    {% if configured_closing_entities | count > 0 %}
-      {{ configured_closing_entities }}
-    {% else %}
-      {{ opening_entities }}
-    {% endif %}
 
+# =============================================================================
+# Triggers
+# =============================================================================
+#
+# open / close:
+#   Stable semantic demands using demand_delay_seconds.
+#
+# ok / conditional / neutral / unavailable:
+#   Immediate semantic state transitions.
+#
+# window_change:
+#   Native state trigger for every physical ventilation opening.
+#
+# active_start:
+#   Reconciliation for a demand that existed before the active time window.
+# =============================================================================
 triggers:
   - trigger: template
     id: open
@@ -174,10 +284,19 @@ triggers:
           | count
         ) == 0
       }}
+    for:
+      seconds: !input demand_delay_seconds
 
+  # closing_entities is intentionally bound inside trigger templates that use it.
+  # Action variables do not exist yet while Home Assistant evaluates triggers.
   - trigger: template
     id: close
     value_template: >-
+      {% set closing_entities =
+        configured_closing_entities
+        if configured_closing_entities | count > 0
+        else opening_entities
+      %}
       {% set valid_floor_states = [
         'ventilate',
         'conditional',
@@ -209,11 +328,17 @@ triggers:
           | count
         ) > 0
       }}
+    for:
+      seconds: !input demand_delay_seconds
 
   - trigger: template
     id: ok
     value_template: >-
-      {% set valid_floor_states = [
+      {% set closing_entities =
+        configured_closing_entities
+        if configured_closing_entities | count > 0
+        else opening_entities
+      %}       {% set valid_floor_states = [
         'ventilate',
         'conditional',
         'keep_closed',
@@ -328,9 +453,67 @@ triggers:
         or invalid_windows.count > 0
       }}
 
+  - trigger: state
+    id: window_change
+    entity_id: !input opening_windows
+
+  # Reconcile a demand that was already active before the active time window.
+  - trigger: time
+    id: active_start
+    at: !input active_after
+
+# =============================================================================
+# Action pipeline
+# =============================================================================
+#
+# 1. Apply event-specific settle/stability delays.
+# 2. Re-read current Floor and physical opening states.
+# 3. Validate Floor API and window-list configuration.
+# 4. Derive control_state and affected openings.
+# 5. Resolve friendly names for action templates.
+# 6. Dispatch user-provided action hooks.
+# =============================================================================
 actions:
+  # ---------------------------------------------------------------------------
+  # Physical-window settle delay
+  #
+  # Wait briefly so window_update_actions receives the stable physical state.
+  # ---------------------------------------------------------------------------
+  - if:
+      - condition: trigger
+        id: window_change
+    then:
+      - delay:
+          seconds: !input window_update_delay_seconds
+
+  # A demand already present at active_after must remain valid for the configured
+  # stability time before a notification/announcement is emitted.
+  # ---------------------------------------------------------------------------
+  # Active-start reconciliation
+  #
+  # Wait the full demand stability time again. The current control state is
+  # calculated only after this delay, so stale demands cannot leak through.
+  # mode: restart cancels this delayed run when a newer relevant event occurs.
+  # ---------------------------------------------------------------------------
+  - if:
+      - condition: trigger
+        id: active_start
+    then:
+      - delay:
+          seconds: !input demand_delay_seconds
+
+  # ---------------------------------------------------------------------------
+  # Normalize closing_windows and snapshot current physical state
+  #
+  # Empty closing_windows means: use all opening_windows.
+  # ---------------------------------------------------------------------------
   - variables:
-      control_state: "{{ trigger.id }}"
+      closing_entities: >-
+        {{
+          configured_closing_entities
+          if configured_closing_entities | count > 0
+          else opening_entities
+        }}
       floor_state: "{{ states(floor_entity) }}"
       floor_reason: "{{ state_attr(floor_entity, 'reason') }}"
       invalid_closing_windows: >-
@@ -374,7 +557,42 @@ actions:
         {% endfor %}
         {{ ns.entities }}
 
+  # ---------------------------------------------------------------------------
+  # Derived control-state contract
+  #
+  # ventilate + no opening open      -> open
+  # ventilate + any opening open     -> ok
+  # keep_closed + warning open       -> close
+  # keep_closed + warnings closed    -> ok
+  # conditional                      -> conditional
+  # neutral                          -> neutral
+  # invalid contract                 -> unavailable
+  # ---------------------------------------------------------------------------
   - variables:
+      control_state: >-
+        {% set valid_floor_states = [
+          'ventilate',
+          'conditional',
+          'keep_closed',
+          'neutral'
+        ] %}
+        {% if
+          opening_entities | count == 0
+          or floor_state not in valid_floor_states
+          or (state_attr(floor_entity, 'api_version') | string) != '2'
+          or invalid_closing_windows | count > 0
+          or invalid_windows | count > 0
+        %}
+          unavailable
+        {% elif floor_state == 'ventilate' %}
+          {{ 'ok' if open_opening_windows | count > 0 else 'open' }}
+        {% elif floor_state == 'keep_closed' %}
+          {{ 'close' if open_closing_windows | count > 0 else 'ok' }}
+        {% elif floor_state == 'conditional' %}
+          conditional
+        {% else %}
+          neutral
+        {% endif %}
       windows_to_open: >-
         {% if control_state == 'open' %}
           {{ closed_opening_windows }}
@@ -388,15 +606,65 @@ actions:
           {{ [] }}
         {% endif %}
 
+  # ---------------------------------------------------------------------------
+  # Human-readable affected-opening names
+  #
+  # friendly_name is preferred; entity_id is the safe fallback.
+  # ---------------------------------------------------------------------------
+  - variables:
+      windows_to_open_names: >-
+        {% set ns = namespace(names=[]) %}
+        {% for entity in windows_to_open %}
+          {% set ns.names = ns.names + [
+            state_attr(entity, 'friendly_name') or entity
+          ] %}
+        {% endfor %}
+        {{ ns.names }}
+      windows_to_close_names: >-
+        {% set ns = namespace(names=[]) %}
+        {% for entity in windows_to_close %}
+          {% set ns.names = ns.names + [
+            state_attr(entity, 'friendly_name') or entity
+          ] %}
+        {% endfor %}
+        {{ ns.names }}
+
+  # ---------------------------------------------------------------------------
+  # Action dispatch
+  #
+  # Regular open/close branches are time-gated.
+  # active_start has already waited and revalidated the current demand.
+  # clear/unavailable/window_update are intentionally not time-gated.
+  # ---------------------------------------------------------------------------
   - choose:
       - conditions:
           - condition: trigger
             id: open
+          - condition: time
+            after: !input active_after
+            before: !input active_before
         sequence: !input open_actions
 
       - conditions:
           - condition: trigger
             id: close
+          - condition: time
+            after: !input active_after
+            before: !input active_before
+        sequence: !input close_actions
+
+      - conditions:
+          - condition: trigger
+            id: active_start
+          - condition: template
+            value_template: "{{ control_state == 'open' }}"
+        sequence: !input open_actions
+
+      - conditions:
+          - condition: trigger
+            id: active_start
+          - condition: template
+            value_template: "{{ control_state == 'close' }}"
         sequence: !input close_actions
 
       - conditions:
@@ -411,6 +679,11 @@ actions:
           - condition: trigger
             id: unavailable
         sequence: !input unavailable_actions
+
+      - conditions:
+          - condition: trigger
+            id: window_change
+        sequence: !input window_update_actions
 
 mode: restart
 max_exceeded: silent
