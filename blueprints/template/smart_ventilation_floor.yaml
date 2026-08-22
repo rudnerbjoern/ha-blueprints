@@ -96,7 +96,7 @@ blueprint:
     Smart Ventilation Floor API version: 2
   domain: template
   author: Björn Rudner (@rudnerbjoern)
-  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/dev/blueprints/template/smart_ventilation_floor.yaml
+  source_url: https://github.com/rudnerbjoern/ha-blueprints/blob/main/blueprints/template/smart_ventilation_floor.yaml
   homeassistant:
     min_version: "2024.11.0"
 
