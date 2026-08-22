@@ -19,12 +19,11 @@ blueprint:
     The blueprint evaluates the recommendations of all configured rooms and
     exposes a single recommendation for the entire floor.
 
-    In addition to the room recommendation states, the blueprint evaluates the
+    In addition to the room recommendation states, the blueprint aggregates the
     indoor and outdoor temperature information already exposed by the Smart
-    Ventilation room sensors. This thermal information is used only as a
-    floor-level tie-breaker. The physical ventilation decision for each
-    individual room remains the responsibility of the Smart Ventilation Sensor
-    blueprint.
+    Ventilation room sensors for diagnostics. The physical ventilation decision
+    for each individual room remains the responsibility of the Smart
+    Ventilation Sensor blueprint.
 
     Floor states:
 
@@ -37,13 +36,11 @@ blueprint:
         direct conflict between rooms recommending ventilate and keep_closed.
 
       keep_closed
-        At least one room recommends keeping the windows closed and no room
-        recommends ventilation. A combination of conditional and keep_closed
-        is also promoted to keep_closed when the outdoor air is sufficiently
-        warmer than the average indoor temperature of the floor.
+        Every configured room recommends keeping the windows closed.
 
       neutral
-        All configured rooms are neutral.
+        All configured rooms are neutral, or there is a fresh-air-compatible
+        mixture of neutral and keep_closed rooms.
 
     Aggregation priority:
 
@@ -53,24 +50,16 @@ blueprint:
          A direct conflict between a clear ventilation recommendation and a
          clear keep-closed recommendation must remain visible.
 
-      2. conditional + keep_closed, no ventilate, and outdoor air is warmer
-         than the floor by at least the configured thermal override threshold
-           -> keep_closed
-
-         This prevents a conditional humidity benefit from causing a
-         floor-level ventilation recommendation when opening the windows would
-         noticeably heat the floor.
-
-      3. any conditional
+      2. any conditional
            -> conditional
 
-      4. any ventilate
+      3. any ventilate
            -> ventilate
 
-      5. any keep_closed
+      4. all rooms keep_closed
            -> keep_closed
 
-      6. otherwise
+      5. otherwise
            -> neutral
 
     The blueprint intentionally does not evaluate physical window or door
@@ -134,21 +123,22 @@ blueprint:
               reorder: false
 
     thermal:
-      name: Thermal aggregation
+      name: Thermal diagnostics
       description: >
-        Settings used only to resolve ambiguous floor-level combinations.
+        Settings used only for floor-level thermal diagnostic attributes.
 
-        These settings do not replace or duplicate the physical ventilation
-        logic of the individual room sensors.
+        These settings do not override the recommendations of the individual
+        room sensors.
       icon: mdi:thermometer-lines
       collapsed: true
       input:
         thermal_override_temperature_difference:
-          name: Thermal override temperature difference
+          name: Warm-outdoor diagnostic threshold
           description: >
             Minimum average temperature difference in °C between outdoor air
-            and the floor's indoor temperature at which a combination of
-            conditional and keep_closed is promoted to keep_closed.
+            and the floor's indoor temperature used by the thermal diagnostic
+            attributes. This setting no longer overrides room recommendations;
+            keep_closed requires unanimous rooms.
 
             The value is calculated as:
 
@@ -193,7 +183,7 @@ triggers:
 #   2. Validate every Room API v1 sensor fail-closed
 #   3. Build room buckets and counts
 #   4. Aggregate diagnostic temperature/drying values
-#   5. Evaluate thermal override
+#   5. Aggregate thermal diagnostics
 #   6. Resolve final floor state and reason
 #
 actions:
@@ -389,10 +379,11 @@ actions:
            if drying_potential_values | count > 0 else none }}
 
   # ---------------------------------------------------------------------------
-  # Stage 6: Thermal tie-breaker.
+  # Stage 6: Thermal diagnostics.
   #
-  # The thermal override may promote conditional + keep_closed to keep_closed,
-  # but it never suppresses an explicit room-level ventilate recommendation.
+  # The legacy thermal-override condition remains available as a diagnostic,
+  # but no longer promotes a mixed floor to keep_closed. That state is now
+  # reserved for unanimous room recommendations.
   # ---------------------------------------------------------------------------
   - variables:
       outside_warmer_than_floor: >-
@@ -407,7 +398,7 @@ actions:
           and minimum_temperature_difference | float
             >= thermal_override_threshold | float
         }}
-      thermal_override_active: >-
+      thermal_override_candidate: >-
         {{
           ventilate_count | int == 0
           and conditional_count | int > 0
@@ -419,23 +410,21 @@ actions:
   # Stage 7: Final aggregation priority.
   #
   # 1. ventilate + keep_closed -> conditional
-  # 2. thermal override        -> keep_closed
-  # 3. any conditional         -> conditional
-  # 4. any ventilate           -> ventilate
-  # 5. any keep_closed         -> keep_closed
-  # 6. otherwise               -> neutral
+  # 2. any conditional         -> conditional
+  # 3. any ventilate           -> ventilate
+  # 4. all rooms keep_closed   -> keep_closed
+  # 5. otherwise               -> neutral
   # ---------------------------------------------------------------------------
   - variables:
       floor_recommendation: >-
         {% if ventilate_count | int > 0 and keep_closed_count | int > 0 %}
           conditional
-        {% elif thermal_override_active | bool %}
-          keep_closed
         {% elif conditional_count | int > 0 %}
           conditional
         {% elif ventilate_count | int > 0 %}
           ventilate
-        {% elif keep_closed_count | int > 0 %}
+        {% elif keep_closed_count | int > 0
+              and keep_closed_count | int == room_entities | count %}
           keep_closed
         {% else %}
           neutral
@@ -443,14 +432,15 @@ actions:
       floor_reason: >-
         {% if ventilate_count | int > 0 and keep_closed_count | int > 0 %}
           conflicting_room_recommendations
-        {% elif thermal_override_active | bool %}
-          warm_outdoor_air_overrides_conditional
         {% elif conditional_count | int > 0 %}
           conditional_room_present
         {% elif ventilate_count | int > 0 %}
           ventilation_recommended
+        {% elif keep_closed_count | int > 0
+              and keep_closed_count | int == room_entities | count %}
+          all_rooms_keep_closed
         {% elif keep_closed_count | int > 0 %}
-          keep_closed_room_present
+          mixed_keep_closed_and_neutral
         {% else %}
           all_rooms_neutral
         {% endif %}
@@ -508,4 +498,5 @@ sensor:
     maximum_drying_potential: "{{ maximum_drying_potential }}"
     outside_warmer_than_floor: "{{ outside_warmer_than_floor | bool }}"
     outside_warmer_than_all_rooms: "{{ outside_warmer_than_all_rooms | bool }}"
-    thermal_override_active: "{{ thermal_override_active | bool }}"
+    thermal_override_active: false
+    thermal_override_candidate: "{{ thermal_override_candidate | bool }}"

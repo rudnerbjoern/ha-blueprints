@@ -20,19 +20,8 @@ def aggregate_floor(
     thermal_override_threshold: float = 1.0,
 ) -> tuple[str, str]:
     """Reference model for the Floor blueprint aggregation contract."""
-    thermal_override = (
-        ventilate == 0
-        and conditional > 0
-        and keep_closed > 0
-        and average_temperature_difference
-        >= thermal_override_threshold
-    )
-
     if ventilate > 0 and keep_closed > 0:
         return "conditional", "conflicting_room_recommendations"
-
-    if thermal_override:
-        return "keep_closed", "warm_outdoor_air_overrides_conditional"
 
     if conditional > 0:
         return "conditional", "conditional_room_present"
@@ -40,8 +29,13 @@ def aggregate_floor(
     if ventilate > 0:
         return "ventilate", "ventilation_recommended"
 
+    room_count = ventilate + conditional + keep_closed + neutral
+
+    if keep_closed > 0 and keep_closed == room_count:
+        return "keep_closed", "all_rooms_keep_closed"
+
     if keep_closed > 0:
-        return "keep_closed", "keep_closed_room_present"
+        return "neutral", "mixed_keep_closed_and_neutral"
 
     return "neutral", "all_rooms_neutral"
 
@@ -127,8 +121,8 @@ def test_five_minute_reconciliation_fallback_is_preserved():
         ),
         pytest.param(
             0, 0, 1, 2, 0.0,
-            "keep_closed", "keep_closed_room_present",
-            id="single-keep-closed",
+            "neutral", "mixed_keep_closed_and_neutral",
+            id="single-keep-closed-with-neutral-rooms",
         ),
         pytest.param(
             1, 0, 1, 1, 0.0,
@@ -147,13 +141,13 @@ def test_five_minute_reconciliation_fallback_is_preserved():
         ),
         pytest.param(
             0, 1, 1, 0, 1.0,
-            "keep_closed", "warm_outdoor_air_overrides_conditional",
-            id="thermal-override-exact-threshold",
+            "conditional", "conditional_room_present",
+            id="thermal-diagnostic-does-not-override-at-threshold",
         ),
         pytest.param(
             0, 2, 1, 0, 3.0,
-            "keep_closed", "warm_outdoor_air_overrides_conditional",
-            id="thermal-override-multiple-conditionals",
+            "conditional", "conditional_room_present",
+            id="thermal-diagnostic-does-not-override-conditionals",
         ),
         pytest.param(
             1, 1, 0, 0, 5.0,
@@ -162,8 +156,13 @@ def test_five_minute_reconciliation_fallback_is_preserved():
         ),
         pytest.param(
             0, 0, 2, 1, 5.0,
-            "keep_closed", "keep_closed_room_present",
-            id="keep-closed-without-conditional",
+            "neutral", "mixed_keep_closed_and_neutral",
+            id="keep-closed-plus-neutral",
+        ),
+        pytest.param(
+            0, 0, 3, 0, 5.0,
+            "keep_closed", "all_rooms_keep_closed",
+            id="unanimous-keep-closed",
         ),
     ],
 )
@@ -192,13 +191,13 @@ def test_floor_aggregation_regression_matrix(
     ("temperature_difference", "threshold", "expected_state"),
     [
         pytest.param(0.99, 1.0, "conditional", id="just-below-threshold"),
-        pytest.param(1.00, 1.0, "keep_closed", id="exact-threshold"),
-        pytest.param(1.01, 1.0, "keep_closed", id="just-above-threshold"),
+        pytest.param(1.00, 1.0, "conditional", id="exact-threshold"),
+        pytest.param(1.01, 1.0, "conditional", id="just-above-threshold"),
         pytest.param(2.99, 3.0, "conditional", id="custom-threshold-below"),
-        pytest.param(3.00, 3.0, "keep_closed", id="custom-threshold-exact"),
+        pytest.param(3.00, 3.0, "conditional", id="custom-threshold-exact"),
     ],
 )
-def test_thermal_override_boundary_regressions(
+def test_thermal_diagnostic_never_overrides_room_recommendations(
     temperature_difference,
     threshold,
     expected_state,
@@ -269,6 +268,7 @@ def test_floor_exposes_room_buckets_and_thermal_diagnostics():
         "outside_warmer_than_floor",
         "outside_warmer_than_all_rooms",
         "thermal_override_active",
+        "thermal_override_candidate",
     }
 
     assert expected <= set(attributes)

@@ -18,6 +18,7 @@ def recommend_room(
     outdoor_vapor_concentration: float,
     indoor_relative_humidity: float | None = None,
     minimum_drying_potential: float = 0.8,
+    maximum_acceptable_negative_drying_potential: float = 2.0,
     strong_drying_potential: float = 2.0,
     very_strong_drying_potential: float = 4.0,
     warmer_threshold: float = 1.0,
@@ -25,7 +26,7 @@ def recommend_room(
     minimum_indoor_relative_humidity: float = 35.0,
     minimum_indoor_vapor: float = 5.5,
 ) -> tuple[str, str]:
-    """Reference model for the Room blueprint recommendation contract."""
+    """Reference model for the Room blueprint candidate recommendation."""
     drying = indoor_vapor_concentration - outdoor_vapor_concentration
     delta_t = outdoor_temperature - indoor_temperature
 
@@ -40,7 +41,7 @@ def recommend_room(
     if dry_air and drying >= minimum_drying_potential:
         return "keep_closed", "indoor_air_already_dry"
 
-    if drying <= -minimum_drying_potential:
+    if drying <= -maximum_acceptable_negative_drying_potential:
         return "keep_closed", "outdoor_air_more_humid"
 
     if (
@@ -137,6 +138,25 @@ def test_configuration_diagnostics_are_public():
 
     assert "configuration_valid" in attributes
     assert "configuration_errors" in attributes
+
+
+def test_keep_closed_stability_diagnostics_are_public():
+    document = load_home_assistant_yaml(ROOM_BLUEPRINT)
+    inputs = document["blueprint"]["input"]["thresholds"]["input"]
+    attributes = document["sensor"]["attributes"]
+
+    assert inputs[
+        "maximum_acceptable_negative_drying_potential"
+    ]["default"] == 2.0
+    assert inputs["keep_closed_confirmation_minutes"]["default"] == 15
+    assert {
+        "candidate_recommendation",
+        "candidate_reason",
+        "keep_closed_pending",
+        "keep_closed_pending_since",
+        "keep_closed_confirmation_minutes",
+        "maximum_acceptable_negative_drying_potential",
+    } <= attributes.keys()
 
 
 def test_optional_humidity_reconciliation_is_one_minute():
@@ -239,9 +259,20 @@ def test_optional_humidity_reconciliation_is_one_minute():
                 indoor_vapor_concentration=8.0,
                 outdoor_vapor_concentration=8.8,
             ),
+            "neutral",
+            "conditions_similar",
+            id="small-moisture-disadvantage-remains-neutral",
+        ),
+        pytest.param(
+            dict(
+                indoor_temperature=22.0,
+                outdoor_temperature=20.0,
+                indoor_vapor_concentration=8.0,
+                outdoor_vapor_concentration=10.0,
+            ),
             "keep_closed",
             "outdoor_air_more_humid",
-            id="outside-wetter-at-threshold",
+            id="outside-wetter-at-close-threshold",
         ),
         pytest.param(
             dict(
@@ -390,3 +421,22 @@ def test_availability_contains_required_sensor_and_config_checks():
 
     assert "required_sensors_valid" in availability
     assert "configuration_valid" in availability
+
+
+def test_keep_closed_confirmation_uses_restored_state_and_pending_timestamp():
+    source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
+
+    assert "this.attributes.get('candidate_recommendation', '')" in source
+    assert "this.attributes.get('keep_closed_pending_since', none)" in source
+    assert "keep_closed_confirmation_minutes_value | float * 60" in source
+    assert "this.state == 'keep_closed'" in source
+
+
+def test_pending_close_is_neutral_and_non_close_candidates_publish_immediately():
+    source = ROOM_BLUEPRINT.read_text(encoding="utf-8")
+
+    assert "candidate_recommendation == 'keep_closed'" in source
+    assert "and keep_closed_confirmation_elapsed | bool" in source
+    assert "elif candidate_recommendation == 'keep_closed'" in source
+    assert "{{ candidate_recommendation }}" in source
+    assert "keep_closed_pending" in source

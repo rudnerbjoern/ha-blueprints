@@ -22,7 +22,13 @@ Each instance evaluates:
 * Outdoor water vapor concentration
 * Optional indoor relative humidity
 
-The generated sensor provides a recommendation state together with diagnostic attributes that can later be consumed by dashboards and automation blueprints.
+The generated sensor provides a recommendation state together with diagnostic
+attributes that can later be consumed by dashboards and automation blueprints.
+
+The dashboard UI is maintained as the separate
+[Smart Ventilation Card](https://github.com/rudnerbjoern/smart-ventilation-card).
+This repository defines the sensor API; the card repository contains the UI,
+installation instructions, and releases.
 
 ---
 
@@ -66,15 +72,41 @@ The higher the value, the greater the potential for removing indoor moisture thr
 
 ### Default Classification
 
-|   Drying potential | Level       |
-| -----------------: | ----------- |
-|     below 0.8 g/m³ | `low`       |
-|       0.8–2.0 g/m³ | `moderate`  |
-|       2.0–4.0 g/m³ | `high`      |
-|   4.0 g/m³ or more | `very_high` |
-| −0.8 g/m³ or lower | `negative`  |
+| Drying potential         | Level               |
+| -----------------------: | ------------------- |
+| below −2.0 g/m³          | `negative`          |
+| −2.0 to below 0 g/m³     | `slightly_negative` |
+| 0 to below 0.8 g/m³      | `low`               |
+| 0.8–2.0 g/m³             | `moderate`          |
+| 2.0–4.0 g/m³             | `high`              |
+| 4.0 g/m³ or more         | `very_high`         |
 
 All thresholds are configurable.
+
+The opening and closing thresholds are intentionally asymmetric. By default,
+ventilation becomes useful at +0.8 g/m³, while a moisture-related closing
+candidate only starts at −2.0 g/m³. The range between them is neutral and
+allows fresh-air ventilation to continue without claiming a drying benefit.
+
+## Keep-closed confirmation
+
+Every `keep_closed` candidate must remain present continuously for 15 minutes
+before the public state changes to `keep_closed`. While confirmation is
+pending, the public state is `neutral` with reason `keep_closed_pending`.
+
+`ventilate`, `conditional`, and ordinary `neutral` candidates are published
+immediately. A confirmed closing recommendation is also cleared immediately
+when its cause disappears. The pending state is exposed through diagnostic
+attributes:
+
+```text
+candidate_recommendation
+candidate_reason
+keep_closed_pending
+keep_closed_pending_since
+keep_closed_confirmation_minutes
+maximum_acceptable_negative_drying_potential
+```
 
 ---
 
@@ -325,7 +357,6 @@ dry_air_protection_source
 
 ```text
 recommended_duration_minutes
-recommended_duration_seconds
 ```
 
 Duration values are only provided when the recommendation is:
@@ -355,6 +386,7 @@ outdoor_air_much_drier_and_cold
 outdoor_air_significantly_drier
 outdoor_air_drier
 conditions_similar
+keep_closed_pending
 ```
 
 Future automation blueprints can translate these reason codes into localized notification text.
@@ -397,7 +429,8 @@ Each room receives its own independent recommendation.
 
 ## Blueprint Updates
 
-The sensor recalculates when one of the primary climate inputs changes and additionally every five minutes.
+The sensor recalculates when one of the primary climate inputs changes and
+additionally every minute.
 
 This periodic update also provides a fallback for:
 
@@ -406,9 +439,13 @@ This periodic update also provides a fallback for:
 * Template reloads
 * Home Assistant restarts
 
+The physical measurements still change only when their source sensors deliver
+new values. The minute trigger does not invent measurements; it reevaluates
+the most recently available valid values.
+
 ---
 
-## Planned Architecture
+## Architecture
 
 Smart Ventilation is intended to become a modular system.
 
@@ -426,7 +463,16 @@ Smart Ventilation Sensor
 
 ### Smart Ventilation Floor
 
-Planned Template Blueprint for aggregating multiple room recommendations into a floor-level state.
+`smart_ventilation_floor.yaml` is the Template Blueprint for aggregating
+multiple room recommendations into a floor-level state. The floor publishes
+`keep_closed` only when every valid room publishes `keep_closed`. A mixture
+of `keep_closed` and `neutral` remains `neutral`, with reason
+`mixed_keep_closed_and_neutral`, so one room does not close an otherwise
+fresh-air-compatible floor. Explicit `ventilate` versus `keep_closed`
+conflicts and all `conditional` recommendations remain visible as
+`conditional`. The former thermal Floor override no longer changes the public
+state; a possible thermal hint remains available only through the diagnostic
+`thermal_override_candidate` attribute.
 
 ### Smart Ventilation Control
 
@@ -450,6 +496,8 @@ Current defaults:
 
 ```text
 Minimum drying potential:        0.8 g/m³
+Accepted negative potential:     2.0 g/m³
+Keep-closed confirmation:        15 min
 Strong drying potential:         2.0 g/m³
 Very strong drying potential:    4.0 g/m³
 
@@ -477,4 +525,4 @@ The initial sensor blueprint should be considered experimental until its behavio
 
 ## Author
 
-Björn Rudner (@rudnerbjoern)
+Björn Rudner (@rudnerbjoern), with the help of AI 😉

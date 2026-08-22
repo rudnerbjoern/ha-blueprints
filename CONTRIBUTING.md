@@ -26,6 +26,29 @@ Main documentation files:
 
 * `README.md`
 * `docs/smart-ventilation.md`
+* `docs/smart-ventilation.de.md`
+
+Dashboard UI changes belong in the separate
+[Smart Ventilation Card](https://github.com/rudnerbjoern/smart-ventilation-card)
+repository.
+
+## Test Suite
+
+On Windows, prepare the local `.venv` and test dependencies once:
+
+```powershell
+.\scripts\prepare-tests.ps1
+```
+
+Then run the same YAML, Markdown, and Python checks used by CI:
+
+```powershell
+.\scripts\run-tests.ps1
+```
+
+Use `run-tests.ps1 -Coverage` to include a terminal coverage report. Re-run
+`prepare-tests.ps1` whenever the test dependencies need to be installed or
+updated.
 
 ## Commit Messages
 

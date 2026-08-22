@@ -41,6 +41,11 @@ blueprint:
       warmer_outdoor_threshold <= much_warmer_outdoor_threshold
       minimum_duration <= maximum_duration
 
+    Closing recommendations use an asymmetric comfort band. A small negative
+    drying potential remains neutral so fresh-air ventilation can continue;
+    keep_closed is only published after its cause remains present for the
+    configured confirmation duration (15 minutes by default).
+
     Optional relative-humidity sensors are intentionally not used directly as
     state-trigger entity IDs because an empty optional blueprint input is not a
     valid entity ID. A one-minute reconciliation trigger therefore keeps
@@ -143,6 +148,38 @@ blueprint:
               step: 0.1
               unit_of_measurement: g/m³
               mode: box
+
+        maximum_acceptable_negative_drying_potential:
+          name: Maximum acceptable negative drying potential
+          description: >
+            Indoor-minus-outdoor vapor concentration disadvantage tolerated
+            before closing is considered. The value is entered as a positive
+            magnitude. For example, 2.0 keeps values down to -2.0 g/m³ neutral.
+            This is intentionally independent from the ventilation threshold.
+          default: 2.0
+          selector:
+            number:
+              min: 0.1
+              max: 10.0
+              step: 0.1
+              unit_of_measurement: g/m³
+              mode: box
+
+        keep_closed_confirmation_minutes:
+          name: Keep-closed confirmation time
+          description: >
+            Number of uninterrupted minutes a closing condition must remain
+            present before keep_closed is published. Other recommendations are
+            published immediately, and a confirmed close clears immediately
+            when its cause disappears.
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 60
+              step: 1
+              unit_of_measurement: min
+              mode: slider
 
         strong_drying_potential:
           name: Strong drying potential
@@ -384,8 +421,9 @@ triggers:
 #   3. Normalize measurements
 #   4. Derive physical values
 #   5. Classify drying/thermal conditions
-#   6. Choose recommendation + reason
-#   7. Estimate whole-minute purge duration
+#   6. Choose candidate recommendation + reason
+#   7. Confirm keep-closed candidates
+#   8. Estimate whole-minute purge duration
 #
 actions:
   # ---------------------------------------------------------------------------
@@ -401,6 +439,8 @@ actions:
       outdoor_vapor_entity: !input outdoor_vapor_concentration
       outdoor_humidity_entity: !input outdoor_relative_humidity
       minimum_drying_potential_value: !input minimum_drying_potential
+      maximum_acceptable_negative_drying_potential_value: !input maximum_acceptable_negative_drying_potential
+      keep_closed_confirmation_minutes_value: !input keep_closed_confirmation_minutes
       strong_drying_potential_value: !input strong_drying_potential
       very_strong_drying_potential_value: !input very_strong_drying_potential
       warmer_outdoor_threshold_value: !input warmer_outdoor_threshold
@@ -526,8 +566,10 @@ actions:
               >= minimum_drying_potential_value | float %}
           moderate
         {% elif drying_potential_value | float
-              <= (0 - minimum_drying_potential_value | float) %}
+              <= (0 - maximum_acceptable_negative_drying_potential_value | float) %}
           negative
+        {% elif drying_potential_value | float < 0 %}
+          slightly_negative
         {% else %}
           low
         {% endif %}
@@ -551,20 +593,23 @@ actions:
         {% endif %}
 
   # ---------------------------------------------------------------------------
-  # Stage 6: Recommendation decision tree.
+  # Stage 6: Candidate recommendation decision tree.
   #
   # Order is significant:
   #   dry-air protection -> wetter outside -> much warmer exceptions
   #   -> warmer conditional -> useful drying -> warm/no benefit -> neutral
   # ---------------------------------------------------------------------------
   - variables:
-      recommendation: >-
-        {% if dry_air_protection | bool
+      candidate_recommendation: >-
+        {% if not required_sensors_valid | bool
+              or not configuration_valid | bool %}
+          unavailable
+        {% elif dry_air_protection | bool
               and drying_potential_value | float
               >= minimum_drying_potential_value | float %}
           keep_closed
         {% elif drying_potential_value | float
-              <= (0 - minimum_drying_potential_value | float) %}
+              <= (0 - maximum_acceptable_negative_drying_potential_value | float) %}
           keep_closed
         {% elif temperature_difference_value | float
               >= much_warmer_outdoor_threshold_value | float
@@ -588,13 +633,17 @@ actions:
         {% else %}
           neutral
         {% endif %}
-      recommendation_reason: >-
-        {% if dry_air_protection | bool
+      candidate_recommendation_reason: >-
+        {% if not required_sensors_valid | bool %}
+          required_sensor_invalid
+        {% elif not configuration_valid | bool %}
+          configuration_invalid
+        {% elif dry_air_protection | bool
               and drying_potential_value | float
               >= minimum_drying_potential_value | float %}
           indoor_air_already_dry
         {% elif drying_potential_value | float
-              <= (0 - minimum_drying_potential_value | float) %}
+              <= (0 - maximum_acceptable_negative_drying_potential_value | float) %}
           outdoor_air_more_humid
         {% elif temperature_difference_value | float
               >= much_warmer_outdoor_threshold_value | float
@@ -627,7 +676,72 @@ actions:
         {% endif %}
 
   # ---------------------------------------------------------------------------
-  # Stage 7: Estimate purge-ventilation duration.
+  # Stage 7: Confirm keep-closed candidates without blocking the update action.
+  #
+  # The sensor's restored attributes carry the start of the pending interval.
+  # The one-minute reconciliation trigger advances the timer even if all source
+  # values stay unchanged. A non-closing candidate clears it immediately.
+  # ---------------------------------------------------------------------------
+  - variables:
+      previous_candidate_recommendation: >-
+        {{ this.attributes.get('candidate_recommendation', '') }}
+      previous_keep_closed_pending_since: >-
+        {{ this.attributes.get('keep_closed_pending_since', none) }}
+      keep_closed_pending_since_value: >-
+        {% if candidate_recommendation != 'keep_closed' %}
+          {{ none }}
+        {% elif this.state == 'keep_closed'
+              and previous_keep_closed_pending_since not in [none, '', 'None'] %}
+          {{ previous_keep_closed_pending_since }}
+        {% elif previous_candidate_recommendation == 'keep_closed'
+              and previous_keep_closed_pending_since not in [none, '', 'None'] %}
+          {{ previous_keep_closed_pending_since }}
+        {% else %}
+          {{ now().isoformat() }}
+        {% endif %}
+
+  - variables:
+      keep_closed_confirmation_elapsed: >-
+        {% set pending_timestamp = as_timestamp(
+          keep_closed_pending_since_value,
+          none
+        ) %}
+        {{
+          candidate_recommendation == 'keep_closed'
+          and (
+            this.state == 'keep_closed'
+            or keep_closed_confirmation_minutes_value | float <= 0
+            or (
+              pending_timestamp is not none
+              and as_timestamp(now()) - pending_timestamp
+                >= keep_closed_confirmation_minutes_value | float * 60
+            )
+          )
+        }}
+      keep_closed_pending: >-
+        {{
+          candidate_recommendation == 'keep_closed'
+          and not keep_closed_confirmation_elapsed | bool
+        }}
+      recommendation: >-
+        {% if candidate_recommendation == 'keep_closed'
+              and keep_closed_confirmation_elapsed | bool %}
+          keep_closed
+        {% elif candidate_recommendation == 'keep_closed' %}
+          neutral
+        {% else %}
+          {{ candidate_recommendation }}
+        {% endif %}
+      recommendation_reason: >-
+        {% if candidate_recommendation == 'keep_closed'
+              and not keep_closed_confirmation_elapsed | bool %}
+          keep_closed_pending
+        {% else %}
+          {{ candidate_recommendation_reason }}
+        {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # Stage 8: Estimate purge-ventilation duration.
   # The result is intentionally whole minutes only. This is a recommendation,
   # not a second-accurate air-exchange calculation.
   # ---------------------------------------------------------------------------
@@ -725,6 +839,14 @@ sensor:
   attributes:
     api_version: "1"
     reason: "{{ recommendation_reason }}"
+    candidate_recommendation: "{{ candidate_recommendation }}"
+    candidate_reason: "{{ candidate_recommendation_reason }}"
+    keep_closed_pending: "{{ keep_closed_pending | bool }}"
+    keep_closed_pending_since: "{{ keep_closed_pending_since_value }}"
+    keep_closed_confirmation_minutes: >-
+      {{ keep_closed_confirmation_minutes_value | int }}
+    maximum_acceptable_negative_drying_potential: >-
+      {{ maximum_acceptable_negative_drying_potential_value | float }}
     configuration_valid: "{{ configuration_valid | bool }}"
     configuration_errors: "{{ configuration_errors }}"
     indoor_temperature: "{{ ti | float | round(1) }}"
